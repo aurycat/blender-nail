@@ -39,10 +39,15 @@ bl_info = {
 
 import bpy
 import re
+import math
 from bpy.types import Operator
 from bpy_extras import view3d_utils
 from mathutils import Vector
 import bmesh
+
+ATTR_SCALE = "BUVScale"
+ATTR_SHIFT = "BUVShift"
+ATTR_ROT   = "BUVRotation"
 
 
 ############
@@ -60,10 +65,12 @@ def main():
 def register():
     bpy.utils.register_class(UVG_OT_align_uv_to_grid)
     bpy.utils.register_class(UVG_OT_unregister)
+    bpy.types.VIEW3D_PT_view3d_lock.append(draw_lock_rotation)
     bpy.types.VIEW3D_MT_uv_map.append(uvg_draw_menu)
 
 def unregister():
     bpy.types.VIEW3D_MT_uv_map.remove(uvg_draw_menu)
+    bpy.types.VIEW3D_PT_view3d_lock.remove(draw_lock_rotation)
     bpy.utils.unregister_class(UVG_OT_align_uv_to_grid)
     bpy.utils.unregister_class(UVG_OT_unregister)
 
@@ -88,6 +95,12 @@ def uvg_draw_menu(self, context):
     a.selected_only = True
     b = layout.operator(cl.bl_idname, text = "Align to Grid (Whole Mesh)")
     b.selected_only = False
+
+def draw_lock_rotation(self, context):
+    layout = self.layout
+    view = context.space_data
+    col = layout.column(align=True)
+    col.prop(view.region_3d, "lock_rotation", text="Lock View Rotation")
 
 
 ############
@@ -144,6 +157,9 @@ def align_one_object(obj, selected_only, world_space):
         if world_space:
             normal = rot_world @ normal
 
+        face_center = face.calc_center_median()
+        int_face_center = Vector((math.floor(face_center[0]), math.floor(face_center[1]), math.floor(face_center[2])))
+
         # The axis to which the normal is closest will be the one with
         # the largest coordinate value.
         dots = [(abs(normal[0]),0), (abs(normal[1]),1), (abs(normal[2]),2)]
@@ -151,24 +167,26 @@ def align_one_object(obj, selected_only, world_space):
         best_fit_axis = dots[2][1] # 0, 1, or 2 for x, y, or z
 
         for loop in face.loops:
-            loop_uv = loop[uv_layer]
-            vert_pos = loop.vert.co
+            vert_pos = loop.vert.co.copy()
+            vert_pos -= int_face_center  # Move UV island to near center
             if world_space:
                 vert_pos = matrix_world @ vert_pos
 
-            uv_coord = None
+            loop_uv = loop[uv_layer]
             if best_fit_axis == 0:
-                uv_coord = Vector((vert_pos[1], vert_pos[2]))
+                loop_uv.uv = Vector((vert_pos[1], vert_pos[2]))
             elif best_fit_axis == 1:
-                uv_coord = Vector((vert_pos[0], vert_pos[2]))
+                loop_uv.uv = Vector((vert_pos[0], vert_pos[2]))
             else:
-                uv_coord = Vector((vert_pos[0], vert_pos[1]))
-
-            loop_uv.uv = uv_coord
+                loop_uv.uv = Vector((vert_pos[0], vert_pos[1]))
 
     bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
     bm.free()
-    
+
+def make_attrs(obj):
+    pass
+
+
 #    me = obj.data
 #    uv_layer = me.uv_layers.active.data
 #    loops = me.loops
