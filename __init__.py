@@ -44,6 +44,7 @@ from bpy.types import Operator
 from bpy_extras import view3d_utils
 from mathutils import Vector, Matrix
 import bmesh
+import datetime
 
 # bmesh apparently doesn't have an API for per-face '2D Vector'
 # attributes, so these need to use 'Vector' (float_vector) instead.
@@ -89,10 +90,10 @@ def register():
     bpy.utils.register_class(NAIL_OT_apply_tex_transform)
     bpy.types.VIEW3D_PT_view3d_lock.append(draw_lock_rotation)
     bpy.types.VIEW3D_MT_editor_menus.append(nail_draw_main_menu)
-    bpy.app.handlers.depsgraph_update_post.append(depsgraph_update_post_handler)
+    bpy.app.handlers.depsgraph_update_post.append(on_post_depsgraph_update)
 
 def unregister():
-    bpy.app.handlers.depsgraph_update_post.remove(depsgraph_update_post_handler)
+    bpy.app.handlers.depsgraph_update_post.remove(on_post_depsgraph_update)
     bpy.types.VIEW3D_PT_view3d_lock.remove(draw_lock_rotation)
     bpy.types.VIEW3D_MT_editor_menus.remove(nail_draw_main_menu)
     bpy.utils.unregister_class(NAIL_OT_unregister)
@@ -131,49 +132,28 @@ class NAIL_MT_main_menu(bpy.types.Menu):
 
     def draw(self, context):
         layout = self.layout
-        active = context.active_object
 
         layout.label(text="Texture Transform", icon='TRANSFORM_ORIGINS')
 
         a = layout.operator(NAIL_OT_set_tex_transform.bl_idname,
             text=NAIL_OT_set_tex_transform.bl_label + " (Default Apply All)")
-        a.shift = [0,0]
-        a.scale = [1,1]
-        a.rotation = 0
+
         # Pull default values from active face
-        if active != None and active.type == 'MESH':
-            bm = bmesh.from_edit_mesh(active.data)
-            if bm.faces.active != None and bm.faces.active.select:
-                get_tex_transform_from_face(bm, bm.faces.active)
-                try:
-                    shift_align_layer = bm.faces.layers.float_vector[ATTR_SHIFT_ALIGN]
-                    scale_rot_layer = bm.faces.layers.float_vector[ATTR_SCALE_ROT]
-
-                    shift_align_attr = bm.faces.active[shift_align_layer]
-                    scale_rot_attr = bm.faces.active[scale_rot_layer]
-
-                    a.shift = [shift_align_attr[0], shift_align_attr[1]]
-                    a.space_align = str(int(shift_align_attr[2]) & ALIGN_SPACE_BIT)
-                    a.plane_align = str(int(shift_align_attr[2]) & ALIGN_PLANE_BIT)
-
-                    scale = [scale_rot_attr[0], scale_rot_attr[1]]
-                    if math.isclose(scale[0], 0): scale[0] = 1
-                    if math.isclose(scale[1], 0): scale[1] = 1
-                    a.scale = scale
-
-                    a.rotation = scale_rot_attr[2]
-                except KeyError:
-                    pass
-            bm.free()
+        tt = TexTransform.from_active_face(context)
+        a.shift = tt.shift
+        a.space_align = str(int(tt.alignment) & ALIGN_SPACE_BIT)
+        a.plane_align = str(int(tt.alignment) & ALIGN_PLANE_BIT)
+        a.scale = tt.scale
+        a.rotation = tt.rotation
         a.apply = {'SHIFT', 'SCALE', 'ROTATION', 'ALIGNMENT'}
 
         b = layout.operator(NAIL_OT_set_tex_transform.bl_idname,
             text=NAIL_OT_set_tex_transform.bl_label + " (Default Apply None)")
         b.shift = a.shift
-        b.scale = a.scale
-        b.rotation = a.rotation
         b.space_align = a.space_align
         b.plane_align = a.plane_align
+        b.scale = a.scale
+        b.rotation = a.rotation
         b.apply = set()
 
         layout.separator()
@@ -191,23 +171,53 @@ class NAIL_MT_main_menu(bpy.types.Menu):
 ### Handlers ###
 ################
 
-def depsgraph_update_post_handler(scene, depsgraph):
-    print("----")
-    for u in depsgraph.updates:
-        if u.id == None or u.id.id_type != 'OBJECT':
-            continue
-        if u.id.type != 'MESH':
-            continue
-        geom = False
-        trans = False
-        if (u.is_updated_geometry):
-            geom = True
-        if u.is_updated_transform:
-            trans = True
-#        print("  ", u.id, u.is_updated_geometry, u.is_updated_shading, u.is_updated_transform)
+# https://blender.stackexchange.com/a/283286/154191
+last_operator = None
+last_operator_value = None
+def on_post_depsgraph_update(scene, depsgraph):
+    global last_operator
+    op = bpy.context.active_operator
+#    if op is not None and op.bl_idname == 'TRANSFORM_OT_translate':
+#        print(op.properties.value)
+    if op is not None and 'value' in op.properties:
+        print(op.properties.value)
+    if op is last_operator:
+        if op is None:
+            return
+#        if 'properties' in op and 'value' in op.properties:
+#            val = op.properties.value
+#            if val is last_operator_value:
+#                retur
+    last_operator = op
 
-        if geom or trans:
-            print(u.id, "   updated geom:", geom, "    updated trans:", trans)
+    for u in depsgraph.updates:
+        if not u.is_updated_transform and not u.is_updated_geometry:
+            continue
+        if u.id is None or u.id.id_type != 'OBJECT' or u.id.type != 'MESH':
+            continue
+        print("mesh changed")
+
+
+#def depsgraph_update_post_handler(scene, depsgraph):
+#    print(bpy.context.active_operator, bpy.context.active_operator.id_data)
+#    return
+#    print("----")
+#    for u in depsgraph.updates:
+#        if u.id == None or u.id.id_type != 'OBJECT':
+#            continue
+#        if u.id.type != 'MESH':
+#            continue
+#        geom = False
+#        trans = False
+#        if (u.is_updated_geometry):
+#            geom = True
+#        if u.is_updated_transform:
+#            trans = True
+##        print("  ", u.id, u.is_updated_geometry, u.is_updated_shading, u.is_updated_transform)
+
+#        if geom or trans:
+#            print(u.id, "   updated geom:", geom, "    updated trans:", trans)
+
 
 #################
 ### Operators ###
@@ -218,7 +228,7 @@ def shared_poll(self, context):
         self.poll_message_set("Must be run in Edit Mode")
         return False
     obj = context.active_object
-    if obj == None and obj.type != 'MESH':
+    if obj is None or obj.type != 'MESH':
         self.poll_message_set("Must have an active (selected) mesh object")
         return False
     return True
@@ -295,17 +305,21 @@ class NAIL_OT_set_tex_transform(Operator):
         update=(lambda s,c: update_apply(s, 'ALIGNMENT')))
 
     @classmethod
-    def poll(self, context):
-        return shared_poll(self, context)
+    def poll(cls, context):
+        return shared_poll(cls, context)
 
     def execute(self, context):
         if len(self.apply) > 0:
             alignment = int(self.space_align) | int(self.plane_align)
-            set_tex_transform(context,
-                shift=(self.shift if 'SHIFT' in self.apply else None),
-                alignment=(alignment if 'ALIGNMENT' in self.apply else None),
-                scale=(self.scale if 'SCALE' in self.apply else None),
-                rotation=(self.rotation if 'ROTATION' in self.apply else None))
+
+            tt = TexTransform()
+            tt.shift     = (self.shift     if 'SHIFT'     in self.apply else None)
+            tt.alignment = (     alignment if 'ALIGNMENT' in self.apply else None)
+            tt.scale     = (self.scale     if 'SCALE'     in self.apply else None)
+            tt.rotation  = (self.rotation  if 'ROTATION'  in self.apply else None)
+
+            set_tex_transform(context, tt)
+                
         return {'FINISHED'}
 
 
@@ -316,8 +330,8 @@ class NAIL_OT_apply_tex_transform(Operator):
     bl_description = "Reapplies the selected faces' texture transforms. Useful to run after moving or modifying faces"
 
     @classmethod
-    def poll(self, context):
-        return shared_poll(self, context)
+    def poll(cls, context):
+        return shared_poll(cls, context)
 
     def execute(self, context):
         apply_tex_transform(context)
@@ -328,14 +342,14 @@ class NAIL_OT_clear_tex_transform(Operator):
     bl_idname = "aurycat.nail_clear_tex_transform"
     bl_label = "Clear Transform"
     bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Clears shift/scale/rotation to default values on all selected faces"
+    bl_description = "Clears shift/scale/rotation/alignment to default values on all selected faces"
 
     @classmethod
-    def poll(self, context):
-        return shared_poll(self, context)
+    def poll(cls, context):
+        return shared_poll(cls, context)
 
     def execute(self, context):
-        set_tex_transform(context, shift=[0,0], scale=[1,1], rotation=0)
+        set_tex_transform(context, TexTransform.cleared())
         return {'FINISHED'}
 
 
@@ -343,44 +357,70 @@ class NAIL_OT_clear_tex_transform(Operator):
 ### Main ###
 ############
 
-def split_align_attr(alignment):
-    return (int(alignment) & ALIGN_SPACE_BIT,
-            int(shift_align_attr[2]) & ALIGN_PLANE_BIT)
+class TexTransform:
+    shift = None
+    alignment = 0
+    scale = None
+    rotation = None
+
+    @classmethod
+    def cleared(cls):
+        tt = TexTransform()
+        tt.shift = [0,0]
+        tt.alignment = 0
+        tt.scale = [1,1]
+        tt.rotation = 0
+        return tt
+
+    @classmethod
+    def from_active_face(cls, context):
+        active = context.active_object
+        if active is not None and active.type == 'MESH':
+            bm = bmesh.from_edit_mesh(active.data)
+            if bm.faces.active is not None and bm.faces.active.select:
+                tt = TexTransform.from_face(bm, bm.faces.active)
+                if math.isclose(tt.scale[0], 0): tt.scale[0] = 1
+                if math.isclose(tt.scale[1], 0): tt.scale[1] = 1
+            else:
+                tt = TexTransform.cleared()
+            bm.free()
+        else:
+            tt = TexTransform.cleared()
+
+        return tt
+
+    @classmethod
+    def from_face(cls, bm, face):
+        tt = TexTransform()
+
+        try:
+            shift_align_layer = bm.faces.layers.float_vector[ATTR_SHIFT_ALIGN]
+            scale_rot_layer = bm.faces.layers.float_vector[ATTR_SCALE_ROT]
+
+            shift_align_attr = face[shift_align_layer]
+            scale_rot_attr = face[scale_rot_layer]
+        except KeyError:
+            return result
+
+        tt.shift = [shift_align_attr[0], shift_align_attr[1]]
+        tt.alignment = shift_align_attr[2]
+
+        scale = [scale_rot_attr[0], scale_rot_attr[1]]
+        if math.isclose(scale[0], 0): scale[0] = 1
+        if math.isclose(scale[1], 0): scale[1] = 1
+        tt.scale = scale
+        tt.rotation = scale_rot_attr[2]
+
+        return tt
 
 
-def get_tex_transform_from_active_face(context);
-    
-
-def get_tex_transform_from_face(bm, face):
-             # shift, align, scale, rotation
-    result = ([0,0], 0, [1,1], 0)
-    try:
-        shift_align_layer = bm.faces.layers.float_vector[ATTR_SHIFT_ALIGN]
-        scale_rot_layer = bm.faces.layers.float_vector[ATTR_SCALE_ROT]
-
-        shift_align_attr = face[shift_align_layer]
-        scale_rot_attr = face[scale_rot_layer]
-    except KeyError:
-        return result
-
-    result[0] = [shift_align_attr[0], shift_align_attr[1]]
-    result[1] = shift_align_attr[2]
-
-    scale = [scale_rot_attr[0], scale_rot_attr[1]]
-    if math.isclose(scale[0], 0): scale[0] = 1
-    if math.isclose(scale[1], 0): scale[1] = 1
-    result[2] = scale
-    result[3] = scale_rot_attr[2]
-
-    return result
-
-def set_tex_transform(context, shift=None, alignment=None, scale=None, rotation=None):
+def set_tex_transform(context, tt):
     for obj in context.objects_in_mode:
         if obj.type == 'MESH':
             me = obj.data
             bm = bmesh.from_edit_mesh(me)
             make_attrs(bm)
-            set_tex_transform_one_object(bm, shift, alignment, scale, rotation)
+            set_tex_transform_one_object(bm, tt)
             apply_tex_transform_one_object(obj, bm)
             bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
             bm.free()
@@ -397,24 +437,27 @@ def apply_tex_transform(context):
             bm.free()
 
 
-def set_tex_transform_one_object(bm, shift=None, alignment=None, scale=None, rotation=None):
+def set_tex_transform_one_object(bm, tt):
     shiftalign_layer = bm.faces.layers.float_vector[ATTR_SHIFT_ALIGN]
     scalerot_layer = bm.faces.layers.float_vector[ATTR_SCALE_ROT]
 
+    shift, alignment, scale, rotation = tt.shift, tt.alignment, tt.scale, tt.rotation
+    print(tt.shift)
+
     # Shift & alignment
-    if shift != None and alignment != None:
+    if shift is not None and alignment is not None:
         for face in bm.faces:
             if face.select:
                 cur = face[shiftalign_layer]
                 v = Vector((shift[0], shift[1], alignment))
                 face[shiftalign_layer] = v
-    elif shift != None:
+    elif shift is not None:
         for face in bm.faces:
             if face.select:
                 cur = face[shiftalign_layer]
                 v = Vector((shift[0], shift[1], cur[2]))
                 face[shiftalign_layer] = v
-    elif alignment != None:
+    elif alignment is not None:
         for face in bm.faces:
             if face.select:
                 cur = face[shiftalign_layer]
@@ -422,22 +465,22 @@ def set_tex_transform_one_object(bm, shift=None, alignment=None, scale=None, rot
                 face[shiftalign_layer] = v
 
     # Scale & rotation
-    if scale != None:
+    if scale is not None:
         if math.isclose(scale[0], 0): scale[0] = 1
         if math.isclose(scale[1], 0): scale[1] = 1
 
-    if scale != None and rotation != None:
+    if scale is not None and rotation is not None:
         for face in bm.faces:
             if face.select:
                 v = Vector((scale[0], scale[1], rotation))
                 face[scalerot_layer] = v
-    elif scale != None:
+    elif scale is not None:
         for face in bm.faces:
             if face.select:
                 cur = face[scalerot_layer]
                 v = Vector((scale[0], scale[1], cur[2]))
                 face[scalerot_layer] = v
-    elif rotation != None:
+    elif rotation is not None:
         for face in bm.faces:
             if face.select:
                 cur = face[scalerot_layer]
@@ -542,3 +585,4 @@ def make_attrs(bm):
 
 if __name__ == "__main__":
     main()
+
