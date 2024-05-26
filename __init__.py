@@ -89,8 +89,10 @@ def register():
     bpy.utils.register_class(NAIL_OT_apply_tex_transform)
     bpy.types.VIEW3D_PT_view3d_lock.append(draw_lock_rotation)
     bpy.types.VIEW3D_MT_editor_menus.append(nail_draw_main_menu)
+    bpy.app.handlers.depsgraph_update_post.append(depsgraph_update_post_handler)
 
 def unregister():
+    bpy.app.handlers.depsgraph_update_post.remove(depsgraph_update_post_handler)
     bpy.types.VIEW3D_PT_view3d_lock.remove(draw_lock_rotation)
     bpy.types.VIEW3D_MT_editor_menus.remove(nail_draw_main_menu)
     bpy.utils.unregister_class(NAIL_OT_unregister)
@@ -120,7 +122,7 @@ def draw_lock_rotation(self, context):
 
 
 ############
-### Main ###
+### Menu ###
 ############
 
 class NAIL_MT_main_menu(bpy.types.Menu):
@@ -142,6 +144,7 @@ class NAIL_MT_main_menu(bpy.types.Menu):
         if active != None and active.type == 'MESH':
             bm = bmesh.from_edit_mesh(active.data)
             if bm.faces.active != None and bm.faces.active.select:
+                get_tex_transform_from_face(bm, bm.faces.active)
                 try:
                     shift_align_layer = bm.faces.layers.float_vector[ATTR_SHIFT_ALIGN]
                     scale_rot_layer = bm.faces.layers.float_vector[ATTR_SCALE_ROT]
@@ -173,12 +176,42 @@ class NAIL_MT_main_menu(bpy.types.Menu):
         b.plane_align = a.plane_align
         b.apply = set()
 
-        layout.operator(NAIL_OT_clear_tex_transform.bl_idname)
+        layout.separator()
         layout.operator(NAIL_OT_apply_tex_transform.bl_idname)
+        layout.label(text='Auto-apply transforms')
+
+        layout.separator()
+        layout.operator(NAIL_OT_clear_tex_transform.bl_idname)
 
         layout.separator()
         layout.operator(NAIL_OT_unregister.bl_idname)
 
+
+################
+### Handlers ###
+################
+
+def depsgraph_update_post_handler(scene, depsgraph):
+    print("----")
+    for u in depsgraph.updates:
+        if u.id == None or u.id.id_type != 'OBJECT':
+            continue
+        if u.id.type != 'MESH':
+            continue
+        geom = False
+        trans = False
+        if (u.is_updated_geometry):
+            geom = True
+        if u.is_updated_transform:
+            trans = True
+#        print("  ", u.id, u.is_updated_geometry, u.is_updated_shading, u.is_updated_transform)
+
+        if geom or trans:
+            print(u.id, "   updated geom:", geom, "    updated trans:", trans)
+
+#################
+### Operators ###
+#################
 
 def shared_poll(self, context):
     if context.mode != 'EDIT_MESH':
@@ -305,6 +338,41 @@ class NAIL_OT_clear_tex_transform(Operator):
         set_tex_transform(context, shift=[0,0], scale=[1,1], rotation=0)
         return {'FINISHED'}
 
+
+############
+### Main ###
+############
+
+def split_align_attr(alignment):
+    return (int(alignment) & ALIGN_SPACE_BIT,
+            int(shift_align_attr[2]) & ALIGN_PLANE_BIT)
+
+
+def get_tex_transform_from_active_face(context);
+    
+
+def get_tex_transform_from_face(bm, face):
+             # shift, align, scale, rotation
+    result = ([0,0], 0, [1,1], 0)
+    try:
+        shift_align_layer = bm.faces.layers.float_vector[ATTR_SHIFT_ALIGN]
+        scale_rot_layer = bm.faces.layers.float_vector[ATTR_SCALE_ROT]
+
+        shift_align_attr = face[shift_align_layer]
+        scale_rot_attr = face[scale_rot_layer]
+    except KeyError:
+        return result
+
+    result[0] = [shift_align_attr[0], shift_align_attr[1]]
+    result[1] = shift_align_attr[2]
+
+    scale = [scale_rot_attr[0], scale_rot_attr[1]]
+    if math.isclose(scale[0], 0): scale[0] = 1
+    if math.isclose(scale[1], 0): scale[1] = 1
+    result[2] = scale
+    result[3] = scale_rot_attr[2]
+
+    return result
 
 def set_tex_transform(context, shift=None, alignment=None, scale=None, rotation=None):
     for obj in context.objects_in_mode:
@@ -435,6 +503,7 @@ def apply_tex_transform_one_object(obj, bm):
             uv_coord += shift
             loop[uv_layer].uv = uv_coord
 
+
 # For a normalized 3D vector, the largest of the values is the axis to which the
 # vector is most closely pointing, the dominant axis. The other two axes, the
 # nondominant axes, represent the XY, XZ, or YZ plane for which the dominant axis
@@ -450,10 +519,12 @@ def dominant_axis(v):
     else:
         return (2, 0, 1)
 
+
 def dominant_axis_vec(dax):
     return Vector((1 if dax == 0 else 0,
                    1 if dax == 1 else 0,
                    1 if dax == 2 else 0))
+
 
 # Project 3D Vector 'point' onto the plane made of normalized 3D Vector 'normal'
 # and 3D Vector 'origin'. Returns the closest point on the plane (the projection)
