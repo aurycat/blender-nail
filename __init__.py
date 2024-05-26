@@ -47,12 +47,26 @@ import bmesh
 
 # bmesh apparently doesn't have an API for per-face '2D Vector'
 # attributes, so these need to use 'Vector' (float_vector) instead.
-# Those have 3 dimensions, so 'rotation' can be shoved into the Z
-# coord of the 'scale' attribute. That just leaves the 'shift'
-# attribute with an extra unused Z coord.
-ATTR_SCALEROT = "Nail_ScaleRot" # per-face Vector(X Scale, Y Scale, Rotation)
-ATTR_SHIFT    = "Nail_Shift"    # per-face Vector(X Shift, Y Shift, Unused)
-#ATTR_MAP      = "BUVMap"      # per-face-corner (aka per loop)  Vector2D(U, V)
+# Vector has 3 dimensions, so 'rotation' and 'alignment' can be
+# shoved into those extra Z coordinates.
+# Alignment is one of the ALIGN_* constants below
+# Rotation is stored in radians
+ATTR_SHIFT_ALIGN = "Nail_ShiftAlign" # per-face Vector(X Shift, Y Shift, Alignment)
+ATTR_SCALE_ROT   = "Nail_ScaleRot"   # per-face Vector(X Scale, Y Scale, Rotation)
+
+ALIGN_NONE = -1       # This plugin will never change the UVs on this face
+ALIGN_WORLD = 0       # World-space UV alignment. This is like Hammer's default behavior for brushes.
+                      # (https://developer.valvesoftware.com/wiki/Texture_alignment#World_Alignment)
+                      # It is effectively a Cube Projection where the center of the "cube" is the
+                      # world origin, and scale and rotation are identity.
+ALIGN_OBJECT = 1      # Object-space UV alignment. Again like Cube Projection, except the position,
+                      # rotation, and scale of the "cube" are that of the object transform.
+ALIGN_WORLD_FACE = 2  # This is like ALIGN_WORLD, except the "cube" is rotated to be aligned
+                      # to the normal of the face.
+ALIGN_OBJECT_FACE = 3 # This is like ALIGN_OBJECT, except the "cube" is rotated to be aligned
+                      # to the normal of the face.
+ALIGN_SPACE_BIT = 1
+ALIGN_PLANE_BIT = 2
 
 
 ############
@@ -69,21 +83,21 @@ def main():
 
 def register():
     bpy.utils.register_class(NAIL_OT_set_tex_transform)
-    bpy.utils.register_class(UVG_OT_align_uv_to_grid)
     bpy.utils.register_class(NAIL_OT_unregister)
     bpy.utils.register_class(NAIL_MT_main_menu)
+    bpy.utils.register_class(NAIL_OT_clear_tex_transform)
+    bpy.utils.register_class(NAIL_OT_apply_tex_transform)
     bpy.types.VIEW3D_PT_view3d_lock.append(draw_lock_rotation)
-#    bpy.types.VIEW3D_MT_uv_map.append(uvg_draw_menu)
     bpy.types.VIEW3D_MT_editor_menus.append(nail_draw_main_menu)
 
 def unregister():
-#    bpy.types.VIEW3D_MT_uv_map.remove(uvg_draw_menu)
     bpy.types.VIEW3D_PT_view3d_lock.remove(draw_lock_rotation)
     bpy.types.VIEW3D_MT_editor_menus.remove(nail_draw_main_menu)
-    bpy.utils.unregister_class(UVG_OT_align_uv_to_grid)
     bpy.utils.unregister_class(NAIL_OT_unregister)
     bpy.utils.unregister_class(NAIL_OT_set_tex_transform)
     bpy.utils.unregister_class(NAIL_MT_main_menu)
+    bpy.utils.unregister_class(NAIL_OT_clear_tex_transform)
+    bpy.utils.unregister_class(NAIL_OT_apply_tex_transform)
 
 class NAIL_OT_unregister(Operator):
     bl_idname = "aurycat.nail_unregister"
@@ -93,21 +107,6 @@ class NAIL_OT_unregister(Operator):
     def execute(self, context):
         unregister()
         return {'FINISHED'}
-
-#def uvg_draw_menu(
-
-#def uvg_draw_menu(self, context):
-#    layout = self.layout
-#    ob = context.view_layer.objects.active
-#    if ob.type != 'MESH':
-#        return
-
-#    layout.separator()
-#    cl = UVG_OT_align_uv_to_grid
-#    a = layout.operator(cl.bl_idname, text = "Align to Grid (Selected Faces)")
-#    a.selected_only = True
-#    b = layout.operator(cl.bl_idname, text = "Align to Grid (Whole Mesh)")
-#    b.selected_only = False
 
 def nail_draw_main_menu(self, context):
     if context.mode == 'EDIT_MESH':
@@ -132,45 +131,65 @@ class NAIL_MT_main_menu(bpy.types.Menu):
         layout = self.layout
         active = context.active_object
 
+        layout.label(text="Texture Transform", icon='TRANSFORM_ORIGINS')
+
         a = layout.operator(NAIL_OT_set_tex_transform.bl_idname,
-            text=NAIL_OT_set_tex_transform.bl_label + " (Default Apply None)")
+            text=NAIL_OT_set_tex_transform.bl_label + " (Default Apply All)")
         a.shift = [0,0]
         a.scale = [1,1]
         a.rotation = 0
         # Pull default values from active face
         if active != None and active.type == 'MESH':
             bm = bmesh.from_edit_mesh(active.data)
-            if bm.faces.active != None:
+            if bm.faces.active != None and bm.faces.active.select:
                 try:
-                    shift_layer = bm.faces.layers.float_vector[ATTR_SHIFT]
-                    scalerot_layer = bm.faces.layers.float_vector[ATTR_SCALEROT]
+                    shift_align_layer = bm.faces.layers.float_vector[ATTR_SHIFT_ALIGN]
+                    scale_rot_layer = bm.faces.layers.float_vector[ATTR_SCALE_ROT]
 
-                    shift = bm.faces.active[shift_layer]
-                    scalerot = bm.faces.active[scalerot_layer]
+                    shift_align_attr = bm.faces.active[shift_align_layer]
+                    scale_rot_attr = bm.faces.active[scale_rot_layer]
 
-                    a.shift = [shift[0], shift[1]]
+                    a.shift = [shift_align_attr[0], shift_align_attr[1]]
+                    a.space_align = str(int(shift_align_attr[2]) & ALIGN_SPACE_BIT)
+                    a.plane_align = str(int(shift_align_attr[2]) & ALIGN_PLANE_BIT)
 
-                    scale = [scalerot[0], scalerot[1]]
+                    scale = [scale_rot_attr[0], scale_rot_attr[1]]
                     if math.isclose(scale[0], 0): scale[0] = 1
                     if math.isclose(scale[1], 0): scale[1] = 1
                     a.scale = scale
 
-                    a.rotation = scalerot[2]
+                    a.rotation = scale_rot_attr[2]
                 except KeyError:
                     pass
             bm.free()
-        a.apply = set()
+        a.apply = {'SHIFT', 'SCALE', 'ROTATION', 'ALIGNMENT'}
 
-        
         b = layout.operator(NAIL_OT_set_tex_transform.bl_idname,
-            text=NAIL_OT_set_tex_transform.bl_label + " (Default Apply All)")
+            text=NAIL_OT_set_tex_transform.bl_label + " (Default Apply None)")
         b.shift = a.shift
         b.scale = a.scale
         b.rotation = a.rotation
-        b.apply = {'SHIFT', 'SCALE', 'ROTATION'}
+        b.space_align = a.space_align
+        b.plane_align = a.plane_align
+        b.apply = set()
+
+        layout.operator(NAIL_OT_clear_tex_transform.bl_idname)
+        layout.operator(NAIL_OT_apply_tex_transform.bl_idname)
 
         layout.separator()
         layout.operator(NAIL_OT_unregister.bl_idname)
+
+
+def shared_poll(self, context):
+    if context.mode != 'EDIT_MESH':
+        self.poll_message_set("Must be run in Edit Mode")
+        return False
+    obj = context.active_object
+    if obj == None and obj.type != 'MESH':
+        self.poll_message_set("Must have an active (selected) mesh object")
+        return False
+    return True
+
 
 in_update = False
 def update_apply(self, key):
@@ -182,18 +201,20 @@ def update_apply(self, key):
         finally:
             in_update = False
 
+
 class NAIL_OT_set_tex_transform(Operator):
     bl_idname = "aurycat.nail_set_tex_transform"
-    bl_label = "Set Texture Transform"
+    bl_label = "Set Transform"
     bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Sets the texture shift, scale, and/or rotation for all selected faces to the chosen value, which defaults to the current shift value of the active face"
+    bl_description = "Sets the texture shift, scale, and/or rotation for all selected faces to the chosen value. The default values are that of the active face"
 
-    enum_items = (
+    apply_items = (
         ('SHIFT', "Shift", "Update shift"),
         ('SCALE', "Scale", "Update scale"),
         ('ROTATION', "Rotation", "Update rotation"),
+        ('ALIGNMENT', "Alignment", "Update alignment"),
     )
-    apply: bpy.props.EnumProperty(name="Apply", items=enum_items, options={'ENUM_FLAG'})
+    apply: bpy.props.EnumProperty(name="Apply", items=apply_items, options={'ENUM_FLAG'})
 
     shift: bpy.props.FloatVectorProperty(
         name="Shift",
@@ -222,79 +243,120 @@ class NAIL_OT_set_tex_transform(Operator):
         step=50,
         update=(lambda s,c: update_apply(s, 'ROTATION')))
 
+    space_align_items = (
+        (str(0),               "World", "Determine UVs from world-space cube projection"),
+        (str(ALIGN_SPACE_BIT), "Object", "Determine UVs from object-space cube projection"),
+    )
+    space_align: bpy.props.EnumProperty(
+        name="Space Alignment",
+        items=space_align_items,
+        update=(lambda s,c: update_apply(s, 'ALIGNMENT')))
+
+    plane_align_items = (
+        (str(0),               "Axis", "Projection is aligned to axis planes"),
+        (str(ALIGN_PLANE_BIT), "Face", "Projection is aligned to the face plane"),
+    )
+    plane_align: bpy.props.EnumProperty(
+        name="Plane Alignment",
+        items=plane_align_items,
+        update=(lambda s,c: update_apply(s, 'ALIGNMENT')))
+
     @classmethod
     def poll(self, context):
-        if context.mode != 'EDIT_MESH':
-            self.poll_message_set("Must be run in Edit Mode")
-            return False
-        if context.active_object == None and context.active_object.type != 'MESH':
-            self.poll_message_set("Must have an active (selected) mesh object")
-            return False
-        return True
+        return shared_poll(self, context)
 
     def execute(self, context):
         if len(self.apply) > 0:
-            set_tex_attrs(context,
+            alignment = int(self.space_align) | int(self.plane_align)
+            set_tex_transform(context,
                 shift=(self.shift if 'SHIFT' in self.apply else None),
+                alignment=(alignment if 'ALIGNMENT' in self.apply else None),
                 scale=(self.scale if 'SCALE' in self.apply else None),
                 rotation=(self.rotation if 'ROTATION' in self.apply else None))
         return {'FINISHED'}
 
 
-class UVG_OT_align_uv_to_grid(Operator):
-    bl_idname = "aurycat.uvg_align_uv_to_grid"
-    bl_label = "Align UVs to Grid"
+class NAIL_OT_apply_tex_transform(Operator):
+    bl_idname = "aurycat.nail_apply_tex_transform"
+    bl_label = "Apply Current Transform"
     bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Map UVs of faces to world-space. Similar to Cube Projection"
-
-    selected_only: bpy.props.BoolProperty(name="Selected Only", default=True)
-    world_space: bpy.props.BoolProperty(name="World Space", default=True, description="True to align UVs in world/scene space, false to align in object space")
+    bl_description = "Reapplies the selected faces' texture transforms. Useful to run after moving or modifying faces"
 
     @classmethod
     def poll(self, context):
-        if context.mode != 'EDIT_MESH':
-            self.poll_message_set("Must be run in Edit Mode")
-            return False
-#    if not context.tool_settings.mesh_select_mode[2]:
-#        self.poll_message_set("Must be run in face selection mode")
-#        return False
-        return True
+        return shared_poll(self, context)
 
     def execute(self, context):
-        print("--- uvg_align_uv_to_grid(selected_only=" + str(self.selected_only) + ", world_space=" + str(self.world_space))
-        align_objects(context, self.selected_only, self.world_space)
+        apply_tex_transform(context)
         return {'FINISHED'}
 
 
-x_axis = Vector((1,0,0))
-y_axis = Vector((0,1,0))
-z_axis = Vector((0,0,1))
+class NAIL_OT_clear_tex_transform(Operator):
+    bl_idname = "aurycat.nail_clear_tex_transform"
+    bl_label = "Clear Transform"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Clears shift/scale/rotation to default values on all selected faces"
 
-def set_tex_attrs(context, shift=None, scale=None, rotation=None):
+    @classmethod
+    def poll(self, context):
+        return shared_poll(self, context)
+
+    def execute(self, context):
+        set_tex_transform(context, shift=[0,0], scale=[1,1], rotation=0)
+        return {'FINISHED'}
+
+
+def set_tex_transform(context, shift=None, alignment=None, scale=None, rotation=None):
     for obj in context.objects_in_mode:
         if obj.type == 'MESH':
             me = obj.data
             bm = bmesh.from_edit_mesh(me)
             make_attrs(bm)
-            set_tex_attrs_one_object(bm, shift, scale, rotation)
-            apply_tex_attrs(obj, bm)
+            set_tex_transform_one_object(bm, shift, alignment, scale, rotation)
+            apply_tex_transform_one_object(obj, bm)
             bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
             bm.free()
 
 
-def set_tex_attrs_one_object(bm, shift=None, scale=None, rotation=None):
-    shift_layer = bm.faces.layers.float_vector[ATTR_SHIFT]
-    scalerot_layer = bm.faces.layers.float_vector[ATTR_SCALEROT]
+def apply_tex_transform(context):
+    for obj in context.objects_in_mode:
+        if obj.type == 'MESH':
+            me = obj.data
+            bm = bmesh.from_edit_mesh(me)
+            make_attrs(bm)
+            apply_tex_transform_one_object(obj, bm)
+            bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+            bm.free()
 
+
+def set_tex_transform_one_object(bm, shift=None, alignment=None, scale=None, rotation=None):
+    shiftalign_layer = bm.faces.layers.float_vector[ATTR_SHIFT_ALIGN]
+    scalerot_layer = bm.faces.layers.float_vector[ATTR_SCALE_ROT]
+
+    # Shift & alignment
+    if shift != None and alignment != None:
+        for face in bm.faces:
+            if face.select:
+                cur = face[shiftalign_layer]
+                v = Vector((shift[0], shift[1], alignment))
+                face[shiftalign_layer] = v
+    elif shift != None:
+        for face in bm.faces:
+            if face.select:
+                cur = face[shiftalign_layer]
+                v = Vector((shift[0], shift[1], cur[2]))
+                face[shiftalign_layer] = v
+    elif alignment != None:
+        for face in bm.faces:
+            if face.select:
+                cur = face[shiftalign_layer]
+                v = Vector((cur[0], cur[1], alignment))
+                face[shiftalign_layer] = v
+
+    # Scale & rotation
     if scale != None:
         if math.isclose(scale[0], 0): scale[0] = 1
         if math.isclose(scale[1], 0): scale[1] = 1
-
-    if shift != None:
-        for face in bm.faces:
-            if face.select:
-                v = Vector((shift[0], shift[1], 0))
-                face[shift_layer] = v
 
     if scale != None and rotation != None:
         for face in bm.faces:
@@ -315,160 +377,97 @@ def set_tex_attrs_one_object(bm, shift=None, scale=None, rotation=None):
                 face[scalerot_layer] = v
 
 
-def apply_tex_attrs(obj, bm):
+def apply_tex_transform_one_object(obj, bm):
     matrix_world = obj.matrix_world
     rot_world = matrix_world.to_quaternion()
 
     uv_layer = bm.loops.layers.uv.active
-    shift_layer = bm.faces.layers.float_vector[ATTR_SHIFT]
-    scalerot_layer = bm.faces.layers.float_vector[ATTR_SCALEROT]
-
-    world_space = True
+    shiftalign_layer = bm.faces.layers.float_vector[ATTR_SHIFT_ALIGN]
+    scalerot_layer = bm.faces.layers.float_vector[ATTR_SCALE_ROT]
 
     for face in bm.faces:
         if not face.select or len(face.loops) == 0:
             continue
 
-        attr_shift = face[shift_layer]
-        attr_scalerot = face[scalerot_layer]
-        shift = Vector((attr_shift[0], attr_shift[1]))
-        scale = Vector((attr_scalerot[0], attr_scalerot[1]))
+        shift_align_attr = face[shiftalign_layer]
+        scale_rot_attr = face[scalerot_layer]
+
+        alignment = shift_align_attr[2]
+        if alignment == ALIGN_NONE:
+            continue
+        align_world = (alignment == ALIGN_WORLD or alignment == ALIGN_WORLD_FACE)
+        align_face = (alignment == ALIGN_WORLD_FACE or alignment == ALIGN_OBJECT_FACE)
+
+        shift = Vector((shift_align_attr[0], shift_align_attr[1]))
+        scale = Vector((scale_rot_attr[0], scale_rot_attr[1]))
         if math.isclose(scale[0], 0): scale[0] = 1
         if math.isclose(scale[1], 0): scale[1] = 1
-        rotation = attr_scalerot[2]
+        rotation = scale_rot_attr[2]
+        rotation_mat = Matrix.Rotation(rotation, 2)
 
         normal = face.normal
-        if world_space:
+        if align_world:
             normal = rot_world @ normal
 
-#        face_center = face.calc_center_median()
-#        int_face_center = Vector((math.floor(face_center[0]), math.floor(face_center[1]), math.floor(face_center[2])))
+        dax, ndax0, ndax1 = dominant_axis(normal)
 
-        # The axis to which the normal is closest will be the one with
-        # the largest coordinate value.
-        dots = [(abs(normal[0]),0), (abs(normal[1]),1), (abs(normal[2]),2)]
-        dots = sorted(dots, key = lambda x: x[0])
-        best_fit_axis = dots[2][1] # 0, 1, or 2 for x, y, or z
+        # If the dominant axis of the normal is 1, then this face is already axis aligned.
+        # Face alignment and axis alignment will be identical in this case, so do axis
+        # alignment because it's simpler.
+        if math.isclose(normal[dax], 1):
+            align_face = False
+
+        if align_face:
+            dax_vec = dominant_axis_vec(dax)
+            face_rot = normal.rotation_difference(dax_vec)
 
         for loop in face.loops:
-            vert_coord = matrix_world @ loop.vert.co
+            vert_coord = loop.vert.co
+            if align_world:
+                vert_coord = matrix_world @ vert_coord
 
-            if best_fit_axis == 0:
-                uv_coord = Vector((vert_coord[1], vert_coord[2]))
-            elif best_fit_axis == 1:
-                uv_coord = Vector((vert_coord[0], vert_coord[2]))
-            else:
-                uv_coord = Vector((vert_coord[0], vert_coord[1]))
+            if align_face:
+                vert_coord = face_rot @ vert_coord
 
-            uv_coord.rotate(Matrix.Rotation(rotation, 2))
+            uv_coord = Vector((vert_coord[ndax0], vert_coord[ndax1]))
+            uv_coord.rotate(rotation_mat)
             uv_coord *= scale
             uv_coord += shift
-
             loop[uv_layer].uv = uv_coord
-            
 
+# For a normalized 3D vector, the largest of the values is the axis to which the
+# vector is most closely pointing, the dominant axis. The other two axes, the
+# nondominant axes, represent the XY, XZ, or YZ plane for which the dominant axis
+# is that plane's normal.
+# This returns a tuple of the dominant axis index, followed by the two non dominant
+# axis indices.
+def dominant_axis(v):
+    ax, ay, az = abs(v[0]), abs(v[1]), abs(v[2])
+    if ax >= ay and ax >= az:
+        return (0, 1, 2)
+    elif ay >= ax and ay >= az:
+        return (1, 0, 2)
+    else:
+        return (2, 0, 1)
 
-#        new_uv_coords = [None]*len(face.loops)
-#        min_u = float(‘inf’)
-#        min_v = float(‘inf’)
+def dominant_axis_vec(dax):
+    return Vector((1 if dax == 0 else 0,
+                   1 if dax == 1 else 0,
+                   1 if dax == 2 else 0))
 
-#        i = 0
-#        for loop in face.loops:
-#            vert_pos = loop.vert.co.copy()
-#            vert_pos -= int_face_center  # Move UV island to near center
-#            if world_space:
-#                vert_pos = matrix_world @ vert_pos
-#            if best_fit_axis == 0:
-#                coord = [vert_pos[1], vert_pos[2]]
-#            elif best_fit_axis == 1:
-#                coord = [vert_pos[0], vert_pos[2]]
-#            else:
-#                coord = [vert_pos[0], vert_pos[1]]
-#            if coord[0] < min_u:
-#                min_u = coord[0]
-#            if coord[0] < min_v:
-#                min_v = coord[1]
-#            new_uv_coords[i] = coord
-#            i += 1
+# Project 3D Vector 'point' onto the plane made of normalized 3D Vector 'normal'
+# and 3D Vector 'origin'. Returns the closest point on the plane (the projection)
+# as a 3D Vector in the same coordinate system.
+def project_point_onto_plane(point, normal, origin):
+    return point - (normal.dot(point - origin))*normal
 
-#        for coord in new_uv_coords:
-#            rel_u = coord[0] - min_u
-#            rel_v = coord[1] - min_v
-#            rel_u 
-#            
-
-#            coord += shift
-
-#            loop_uv = loop[uv_layer]
-#            loop_uv.uv = coord
-
-
-
-def align_objects(context, selected_only, world_space):
-    for obj in context.objects_in_mode:
-        if obj.type == 'MESH':
-            align_one_object(obj, selected_only, world_space)
-
-def align_one_object(obj, selected_only, world_space):
-    print("--align " + str(obj))
-    bm = bmesh.from_edit_mesh(obj.data)
-    uv_layer = bm.loops.layers.uv.active
-
-    matrix_world = obj.matrix_world
-    rot_world = matrix_world.to_quaternion()
-
-    for face in bm.faces:
-        if selected_only and not face.select:
-            continue
-
-        normal = face.normal
-        if world_space:
-            normal = rot_world @ normal
-
-        face_center = face.calc_center_median()
-        int_face_center = Vector((math.floor(face_center[0]), math.floor(face_center[1]), math.floor(face_center[2])))
-
-        # The axis to which the normal is closest will be the one with
-        # the largest coordinate value.
-        dots = [(abs(normal[0]),0), (abs(normal[1]),1), (abs(normal[2]),2)]
-        dots = sorted(dots, key = lambda x: x[0])
-        best_fit_axis = dots[2][1] # 0, 1, or 2 for x, y, or z
-
-        for loop in face.loops:
-            vert_pos = loop.vert.co.copy()
-            vert_pos -= int_face_center  # Move UV island to near center
-            if world_space:
-                vert_pos = matrix_world @ vert_pos
-
-            loop_uv = loop[uv_layer]
-            if best_fit_axis == 0:
-                loop_uv.uv = Vector((vert_pos[1], vert_pos[2]))
-            elif best_fit_axis == 1:
-                loop_uv.uv = Vector((vert_pos[0], vert_pos[2]))
-            else:
-                loop_uv.uv = Vector((vert_pos[0], vert_pos[1]))
-
-    bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
-    bm.free()
 
 def make_attrs(bm):
-    if ATTR_SHIFT not in bm.faces.layers.float_vector:
-        bm.faces.layers.float_vector.new(ATTR_SHIFT)
-    if ATTR_SCALEROT not in bm.faces.layers.float_vector:
-        bm.faces.layers.float_vector.new(ATTR_SCALEROT)
+    if ATTR_SHIFT_ALIGN not in bm.faces.layers.float_vector:
+        bm.faces.layers.float_vector.new(ATTR_SHIFT_ALIGN)
+    if ATTR_SCALE_ROT not in bm.faces.layers.float_vector:
+        bm.faces.layers.float_vector.new(ATTR_SCALE_ROT)
 
-
-#    me = obj.data
-#    uv_layer = me.uv_layers.active.data
-#    loops = me.loops
-
-#    for poly in me.polygons:
-#        for loop_index in poly.loop_indices:
-#            loop = me.loops[loop_index]
-#            uv_layer_loop = uv_layer[loop_index]
-
-#            print("    Vertex: %d" % me.loops[loop_index].vertex_index)
-#            print("    UV: %r" % uv_layer[loop_index].uv)
 
 if __name__ == "__main__":
     main()
