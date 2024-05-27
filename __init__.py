@@ -53,19 +53,20 @@ from mathutils import Vector, Matrix
 ATTR_SHIFT_ALIGN = "Nail_ShiftAlign" # per-face Vector(X Shift, Y Shift, Alignment)
 ATTR_SCALE_ROT   = "Nail_ScaleRot"   # per-face Vector(X Scale, Y Scale, Rotation)
 
-ALIGN_NONE = -1       # This plugin will never change the UVs on this face
-ALIGN_WORLD = 0       # World-space UV alignment. This is like Hammer's default behavior for brushes.
-                      # (https://developer.valvesoftware.com/wiki/Texture_alignment#World_Alignment)
-                      # It is effectively a Cube Projection where the center of the "cube" is the
-                      # world origin, and scale and rotation are identity.
-ALIGN_OBJECT = 1      # Object-space UV alignment. Again like Cube Projection, except the position,
-                      # rotation, and scale of the "cube" are that of the object transform.
-ALIGN_WORLD_FACE = 2  # This is like ALIGN_WORLD, except the "cube" is rotated to be aligned
-                      # to the normal of the face.
-ALIGN_OBJECT_FACE = 3 # This is like ALIGN_OBJECT, except the "cube" is rotated to be aligned
-                      # to the normal of the face.
-ALIGN_SPACE_BIT = 1
-ALIGN_PLANE_BIT = 2
+#ALIGN_NONE = -1       # This plugin will never change the UVs on this face
+#ALIGN_WORLD = 0       # World-space UV alignment. This is like Hammer's default behavior for brushes.
+#                      # (https://developer.valvesoftware.com/wiki/Texture_alignment#World_Alignment)
+#                      # It is effectively a Cube Projection where the center of the "cube" is the
+#                      # world origin, and scale and rotation are identity.
+#ALIGN_OBJECT = 1      # Object-space UV alignment. Again like Cube Projection, except the position,
+#                      # rotation, and scale of the "cube" are that of the object transform.
+#ALIGN_WORLD_FACE = 2  # This is like ALIGN_WORLD, except the "cube" is rotated to be aligned
+#                      # to the normal of the face.
+#ALIGN_OBJECT_FACE = 3 # This is like ALIGN_OBJECT, except the "cube" is rotated to be aligned
+#                      # to the normal of the face.
+ALIGN_ENABLE_BIT = 1
+ALIGN_SPACE_BIT = 2
+ALIGN_PLANE_BIT = 4
 
 
 ############
@@ -92,6 +93,7 @@ def register():
 
     bpy.types.WindowManager.nail_settings = bpy.props.PointerProperty(name='Nail Settings', type=NailSettings)
     auto_apply_updated(None, bpy.context)
+    WRAP_UVS = bpy.context.window_manager.nail_settings.wrap_uvs
 
 def unregister():
     # Set to None before unregistering NailSceneSettings to avoid Blender crash
@@ -151,6 +153,8 @@ class NailSettings(bpy.types.PropertyGroup):
         description="Automatically applies the current transform as objects are transformed or meshes are updated. While in edit mode, only applies to selected faces or their adjacent faces, for efficiency")
     fast_updates: bpy.props.BoolProperty(name="Fast Update Rate", default=False,
         description="Makes Auto Apply update faster, potentially slowing down Blender while editing larger meshes")
+    wrap_uvs: bpy.props.BoolProperty(name="Wrap UVs", default=True,
+        description="If True, each face's UV island is wrapped to be near (0,0) in UV space. Otherwise, UVs are projected literally from world-space coordinates, meaning the UVs can be very far from (0,0) if the face is far from the world origin")
 
 
 ############
@@ -366,7 +370,7 @@ class NAIL_OT_set_tex_transform(Operator):
 
     def execute(self, context):
         if len(self.apply) > 0:
-            alignment = int(self.space_align) | int(self.plane_align)
+            alignment = ALIGN_ENABLE_BIT | int(self.space_align) | int(self.plane_align)
 
             tt = TexTransform()
             tt.shift     = (self.shift     if 'SHIFT'     in self.apply else None)
@@ -398,7 +402,7 @@ class NAIL_OT_clear_tex_transform(Operator):
     bl_idname = "aurycat.nail_clear_tex_transform"
     bl_label = "Clear Transform"
     bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Clears shift/scale/rotation/alignment to default values on all selected faces"
+    bl_description = "Clears texture transforms for the selected faces, so they are no longer affected by Nail"
 
     @classmethod
     def poll(cls, context):
@@ -451,8 +455,6 @@ class TexTransform:
 
     @classmethod
     def from_face(cls, bm, face):
-        tt = TexTransform()
-
         try:
             shift_align_layer = bm.faces.layers.float_vector[ATTR_SHIFT_ALIGN]
             scale_rot_layer = bm.faces.layers.float_vector[ATTR_SCALE_ROT]
@@ -460,11 +462,16 @@ class TexTransform:
             shift_align_attr = face[shift_align_layer]
             scale_rot_attr = face[scale_rot_layer]
         except KeyError:
-            return result
+            return TexTransform.cleared()
+
+        alignment = int(shift_align_attr[2])
+        if (alignment & ALIGN_ENABLE_BIT) == 0:
+            return TexTransform.cleared()
+
+        tt = TexTransform()
 
         tt.shift = [shift_align_attr[0], shift_align_attr[1]]
-        tt.alignment = shift_align_attr[2]
-
+        tt.alignment = alignment
         scale = [scale_rot_attr[0], scale_rot_attr[1]]
         if math.isclose(scale[0], 0): scale[0] = 1
         if math.isclose(scale[1], 0): scale[1] = 1
@@ -514,6 +521,15 @@ def set_tex_transform_one_mesh(bm, tt):
     scalerot_layer = bm.faces.layers.float_vector[ATTR_SCALE_ROT]
 
     shift, alignment, scale, rotation = tt.shift, tt.alignment, tt.scale, tt.rotation
+
+    # Unless alignment is specified, assume all faces are to set enabled for alignment
+    if alignment is None:
+        for face in bm.faces:
+            if face.select:
+                cur = face[shiftalign_layer]
+                a = float(int(cur[2]) | ALIGN_ENABLE_BIT)
+                v = Vector((cur[0], cur[1], a))
+                face[shiftalign_layer] = v
 
     # Shift & alignment
     if shift is not None and alignment is not None:
@@ -567,12 +583,15 @@ def apply_tex_transform_one_mesh(obj, bm, context, auto_apply=False):
     shiftalign_layer = bm.faces.layers.float_vector[ATTR_SHIFT_ALIGN]
     scalerot_layer = bm.faces.layers.float_vector[ATTR_SCALE_ROT]
 
+    edit_mode = (context.mode == 'EDIT_MESH')
+    wrap_uvs = context.window_manager.nail_settings.wrap_uvs
+
     for face in bm.faces:
         if len(face.loops) == 0: # Not sure if this is possible, but safety check anyway
             continue
 
         if auto_apply:
-            if context.mode == 'EDIT_MESH':
+            if edit_mode:
                 # In auto-apply mode, apply to selected faces as well as any faces that
                 # have a selected vertex, since they could be affected by the changes
                 if not face.select:
@@ -586,7 +605,7 @@ def apply_tex_transform_one_mesh(obj, bm, context, auto_apply=False):
             else:
                 pass # In object mode, always update all faces
         else: # Manually applied via menu option
-            if context.mode == 'EDIT_MESH':
+            if edit_mode:
                 if not face.select:
                     continue
             else:
@@ -595,11 +614,12 @@ def apply_tex_transform_one_mesh(obj, bm, context, auto_apply=False):
         shift_align_attr = face[shiftalign_layer]
         scale_rot_attr = face[scalerot_layer]
 
-        alignment = shift_align_attr[2]
-        if alignment == ALIGN_NONE:
+        alignment = int(shift_align_attr[2])
+        align_enable = (alignment & ALIGN_ENABLE_BIT) != 0
+        if not align_enable:
             continue
-        align_world = (alignment == ALIGN_WORLD or alignment == ALIGN_WORLD_FACE)
-        align_face = (alignment == ALIGN_WORLD_FACE or alignment == ALIGN_OBJECT_FACE)
+        align_world = (alignment & ALIGN_SPACE_BIT) == 0
+        align_face = (alignment & ALIGN_PLANE_BIT) != 0
 
         shift = Vector((shift_align_attr[0], shift_align_attr[1]))
         scale = Vector((scale_rot_attr[0], scale_rot_attr[1]))
@@ -638,6 +658,12 @@ def apply_tex_transform_one_mesh(obj, bm, context, auto_apply=False):
             uv_coord += shift
             loop[uv_layer].uv = uv_coord
 
+        if wrap_uvs:
+            coord0 = face.loops[0][uv_layer].uv
+            wrapped_coord0 = Vector((frac(coord0[0]), frac(coord0[1])))
+            diff_coord0 = wrapped_coord0 - coord0
+            for loop in face.loops:
+                loop[uv_layer].uv += diff_coord0
 
 # For a normalized 3D vector, the largest of the values is the axis to which the
 # vector is most closely pointing, the dominant axis. The other two axes, the
@@ -691,7 +717,11 @@ def mesh_has_nail_attrs(m):
             m.attributes[ATTR_SCALE_ROT].domain      == 'FACE' and
             m.attributes[ATTR_SHIFT_ALIGN].data_type == 'FLOAT_VECTOR' and
             m.attributes[ATTR_SCALE_ROT].data_type   == 'FLOAT_VECTOR')
-           
+
+# https://developer.download.nvidia.com/cg/frac.html
+def frac(f):
+    return f - math.floor(f)
+
 
 if __name__ == "__main__":
     main()
