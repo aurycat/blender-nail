@@ -501,7 +501,7 @@ def apply_tex_transform(context):
 
 def apply_tex_transform_one_object(obj, context, auto_apply=False): # Must be MESH type
     me = obj.data
-    if context.mode == 'EDIT_MESH':
+    if me.is_editmode:
         bm = bmesh.from_edit_mesh(me)
         make_nail_attrs(me, bm)
         apply_tex_transform_one_mesh(obj, bm, context, auto_apply=auto_apply)
@@ -583,9 +583,9 @@ def apply_tex_transform_one_mesh(obj, bm, context, auto_apply=False):
     shiftalign_layer = bm.faces.layers.float_vector[ATTR_SHIFT_ALIGN]
     scalerot_layer = bm.faces.layers.float_vector[ATTR_SCALE_ROT]
 
-    edit_mode = (context.mode == 'EDIT_MESH')
+    edit_mode = obj.data.is_editmode
     wrap_uvs = context.window_manager.nail_settings.wrap_uvs
-
+    print("------------")
     for face in bm.faces:
         if len(face.loops) == 0: # Not sure if this is possible, but safety check anyway
             continue
@@ -631,14 +631,15 @@ def apply_tex_transform_one_mesh(obj, bm, context, auto_apply=False):
         normal = face.normal
         if align_world:
             normal = rot_world @ normal
+        print(normal)
 
         dax, ndax0, ndax1 = dominant_axis(normal)
 
         # If the dominant axis of the normal is 1, then this face is already axis aligned.
         # Face alignment and axis alignment will be identical in this case, so do axis
         # alignment because it's simpler.
-        if math.isclose(normal[dax], 1):
-            align_face = False
+#        if math.isclose(normal[dax], 1):
+#            align_face = False
 
         if align_face:
             dax_vec = dominant_axis_vec(dax)
