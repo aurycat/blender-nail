@@ -44,7 +44,8 @@ from bpy.types import Operator
 from bpy_extras import view3d_utils
 from mathutils import Vector, Matrix
 import bmesh
-import datetime
+import time
+from bpy.app.handlers import persistent
 
 # bmesh apparently doesn't have an API for per-face '2D Vector'
 # attributes, so these need to use 'Vector' (float_vector) instead.
@@ -88,19 +89,34 @@ def register():
     bpy.utils.register_class(NAIL_MT_main_menu)
     bpy.utils.register_class(NAIL_OT_clear_tex_transform)
     bpy.utils.register_class(NAIL_OT_apply_tex_transform)
+    bpy.utils.register_class(NailSettings)
     bpy.types.VIEW3D_PT_view3d_lock.append(draw_lock_rotation)
     bpy.types.VIEW3D_MT_editor_menus.append(nail_draw_main_menu)
-    bpy.app.handlers.depsgraph_update_post.append(on_post_depsgraph_update)
+
+    bpy.types.WindowManager.nail_settings = bpy.props.PointerProperty(name='Nail Settings', type=NailSettings)
+    auto_apply_updated(None, bpy.context)
 
 def unregister():
-    bpy.app.handlers.depsgraph_update_post.remove(on_post_depsgraph_update)
+    # Set to None before unregistering NailSceneSettings to avoid Blender crash
+    bpy.types.WindowManager.nail_settings = None
+
+    enable_post_depsgraph_update_handler(False)
+
     bpy.types.VIEW3D_PT_view3d_lock.remove(draw_lock_rotation)
     bpy.types.VIEW3D_MT_editor_menus.remove(nail_draw_main_menu)
-    bpy.utils.unregister_class(NAIL_OT_unregister)
-    bpy.utils.unregister_class(NAIL_OT_set_tex_transform)
-    bpy.utils.unregister_class(NAIL_MT_main_menu)
-    bpy.utils.unregister_class(NAIL_OT_clear_tex_transform)
-    bpy.utils.unregister_class(NAIL_OT_apply_tex_transform)
+    safe_unregister_class(NAIL_OT_unregister)
+    safe_unregister_class(NAIL_OT_set_tex_transform)
+    safe_unregister_class(NAIL_MT_main_menu)
+    safe_unregister_class(NAIL_OT_clear_tex_transform)
+    safe_unregister_class(NAIL_OT_apply_tex_transform)
+    safe_unregister_class(NailSettings)
+
+# Don't error out if the class wasn't registered
+def safe_unregister_class(cls):
+    try:
+        bpy.utils.unregister_class(cls)
+    except RuntimeError:
+        pass
 
 class NAIL_OT_unregister(Operator):
     bl_idname = "aurycat.nail_unregister"
@@ -120,6 +136,21 @@ def draw_lock_rotation(self, context):
     view = context.space_data
     col = layout.column(align=True)
     col.prop(view.region_3d, "lock_rotation", text="Lock View Rotation")
+
+
+################
+### Settings ###
+################
+
+def auto_apply_updated(_, context):
+    auto_apply = False
+    if 'nail_settings' in context.window_manager:
+        if 'auto_apply' in context.window_manager.nail_settings:
+            auto_apply = context.window_manager.nail_settings.auto_apply
+    enable_post_depsgraph_update_handler(auto_apply)
+
+class NailSettings(bpy.types.PropertyGroup):
+    auto_apply: bpy.props.BoolProperty(name="Auto Apply", default=False, update=auto_apply_updated)
 
 
 ############
@@ -158,7 +189,7 @@ class NAIL_MT_main_menu(bpy.types.Menu):
 
         layout.separator()
         layout.operator(NAIL_OT_apply_tex_transform.bl_idname)
-        layout.label(text='Auto-apply transforms')
+        layout.prop(bpy.context.window_manager.nail_settings, 'auto_apply', text="Auto-Apply Transforms") 
 
         layout.separator()
         layout.operator(NAIL_OT_clear_tex_transform.bl_idname)
@@ -171,31 +202,101 @@ class NAIL_MT_main_menu(bpy.types.Menu):
 ### Handlers ###
 ################
 
+def enable_post_depsgraph_update_handler(enable):
+    if enable:
+        if on_post_depsgraph_update not in bpy.app.handlers.depsgraph_update_post:
+            bpy.app.handlers.depsgraph_update_post.append(on_post_depsgraph_update)
+    else:
+        if on_post_depsgraph_update in bpy.app.handlers.depsgraph_update_post:
+            bpy.app.handlers.depsgraph_update_post.remove(on_post_depsgraph_update)
+
+UPDATE_INTERVAL = 1
+
 # https://blender.stackexchange.com/a/283286/154191
-last_operator = None
-last_operator_value = None
+@persistent
 def on_post_depsgraph_update(scene, depsgraph):
-    global last_operator
+    self = on_post_depsgraph_update
+
     op = bpy.context.active_operator
-#    if op is not None and op.bl_idname == 'TRANSFORM_OT_translate':
-#        print(op.properties.value)
-    if op is not None and 'value' in op.properties:
-        print(op.properties.value)
-    if op is last_operator:
-        if op is None:
-            return
-#        if 'properties' in op and 'value' in op.properties:
-#            val = op.properties.value
-#            if val is last_operator_value:
-#                retur
-    last_operator = op
+    op_changed = op is not self.last_operator
+    self.last_operator = op
+
+    print(op)
+
+    now = time.monotonic()
+    if not (op_changed or self.last_geom_update_time is None or
+            (now - self.last_geom_update_time) > UPDATE_INTERVAL):
+        if not bpy.app.timers.is_registered(geom_update_timer):
+            bpy.app.timers.register(geom_update_timer, first_interval=UPDATE_INTERVAL)
+        return
 
     for u in depsgraph.updates:
         if not u.is_updated_transform and not u.is_updated_geometry:
             continue
         if u.id is None or u.id.id_type != 'OBJECT' or u.id.type != 'MESH':
             continue
-        print("mesh changed")
+        if not mesh_has_nail_attrs(u.id.data):
+            continue
+
+        if bpy.app.timers.is_registered(geom_update_timer):
+            bpy.app.timers.unregister(geom_update_timer)
+        
+        self.last_geom_update_time = now
+        apply_tex_transform_one_object(u.id, bpy.context)
+
+
+on_post_depsgraph_update.last_operator = None
+on_post_depsgraph_update.last_geom_update_time = None
+
+def geom_update_timer():
+    for obj in bpy.context.selected_objects:
+        apply_tex_transform_one_object(obj, bpy.context)
+    return None
+    
+
+#        if op is None:
+#            return
+##        if 'properties' in op and 'value' in op.properties:
+##            val = op.properties.value
+##            if val is last_operator_value:
+##                retur
+#    last_operator = op
+
+#    geom_updates = [
+#        u.id for u in depsgraph.updates if
+#            (u.is_updated_transform or u.is_updated_geometry)
+#            and u.id is not None and u.id.id_type == 'OBJECT' and u.id.type == 'MESH']
+
+#    if len(geom_updates) > 0:
+#        print(geom_updates)
+#        if op_changed:
+#            print(time.monotonic(), "update")
+#            if bpy.app.timers.is_registered(geom_update_timer):
+#                bpy.app.timers.unregister(geom_update_timer)
+#        else:
+#            if not bpy.app.timers.is_registered(geom_update_timer):
+#                print("register")
+#                bpy.app.timers.register(geom_update_timer, first_interval=1)
+#        on_geometry_change(geom_updates)
+
+##    if op is not None and op.bl_idname == 'TRANSFORM_OT_translate':
+##        print(op.properties.value)
+#    if op is not None and 'value' in op.properties:
+#        print(op.properties.value)
+#    print(geom_updates)
+#    for u in depsgraph.updates:
+#        if not u.is_updated_transform and not u.is_updated_geometry:
+#            continue
+#        if u.id is None or u.id.id_type != 'OBJECT' or u.id.type != 'MESH':
+#            continue
+#        print("mesh changed")
+
+#def geom_update_timer():
+#    print(time.monotonic(), "timer update")
+#    return None
+
+#def on_geometry_change(geom_updates):
+
 
 
 #def depsgraph_update_post_handler(scene, depsgraph):
@@ -376,14 +477,18 @@ class TexTransform:
     def from_active_face(cls, context):
         active = context.active_object
         if active is not None and active.type == 'MESH':
-            bm = bmesh.from_edit_mesh(active.data)
-            if bm.faces.active is not None and bm.faces.active.select:
-                tt = TexTransform.from_face(bm, bm.faces.active)
-                if math.isclose(tt.scale[0], 0): tt.scale[0] = 1
-                if math.isclose(tt.scale[1], 0): tt.scale[1] = 1
+            me = active.data
+            if mesh_has_nail_attrs(me):
+                bm = bmesh.from_edit_mesh(me)
+                if bm.faces.active is not None and bm.faces.active.select:
+                    tt = TexTransform.from_face(bm, bm.faces.active)
+                    if math.isclose(tt.scale[0], 0): tt.scale[0] = 1
+                    if math.isclose(tt.scale[1], 0): tt.scale[1] = 1
+                else:
+                    tt = TexTransform.cleared()
+                bm.free()
             else:
                 tt = TexTransform.cleared()
-            bm.free()
         else:
             tt = TexTransform.cleared()
 
@@ -419,8 +524,8 @@ def set_tex_transform(context, tt):
         if obj.type == 'MESH':
             me = obj.data
             bm = bmesh.from_edit_mesh(me)
-            make_attrs(bm)
-            set_tex_transform_one_object(bm, tt)
+            make_nail_attrs(me, bm)
+            set_tex_transform_one_mesh(bm, tt)
             apply_tex_transform_one_object(obj, bm)
             bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
             bm.free()
@@ -429,20 +534,31 @@ def set_tex_transform(context, tt):
 def apply_tex_transform(context):
     for obj in context.objects_in_mode:
         if obj.type == 'MESH':
-            me = obj.data
-            bm = bmesh.from_edit_mesh(me)
-            make_attrs(bm)
-            apply_tex_transform_one_object(obj, bm)
-            bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
-            bm.free()
+            apply_tex_transform_one_object(obj, context)
 
 
-def set_tex_transform_one_object(bm, tt):
+def apply_tex_transform_one_object(obj, context): # Must be MESH type
+    me = obj.data
+    if context.mode == 'EDIT_MESH':
+        bm = bmesh.from_edit_mesh(me)
+        make_nail_attrs(me, bm)
+        apply_tex_transform_one_mesh(obj, bm, use_selection=True)
+        bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+        bm.free()
+    elif context.mode == 'OBJECT':
+        bm = bmesh.new()
+        bm.from_mesh(me)
+        make_nail_attrs(me, bm)
+        apply_tex_transform_one_mesh(obj, bm,  use_selection=False)
+        bm.to_mesh(me)
+        bm.free()
+
+
+def set_tex_transform_one_mesh(bm, tt):
     shiftalign_layer = bm.faces.layers.float_vector[ATTR_SHIFT_ALIGN]
     scalerot_layer = bm.faces.layers.float_vector[ATTR_SCALE_ROT]
 
     shift, alignment, scale, rotation = tt.shift, tt.alignment, tt.scale, tt.rotation
-    print(tt.shift)
 
     # Shift & alignment
     if shift is not None and alignment is not None:
@@ -488,7 +604,7 @@ def set_tex_transform_one_object(bm, tt):
                 face[scalerot_layer] = v
 
 
-def apply_tex_transform_one_object(obj, bm):
+def apply_tex_transform_one_mesh(obj, bm, use_selection):
     matrix_world = obj.matrix_world
     rot_world = matrix_world.to_quaternion()
 
@@ -497,7 +613,9 @@ def apply_tex_transform_one_object(obj, bm):
     scalerot_layer = bm.faces.layers.float_vector[ATTR_SCALE_ROT]
 
     for face in bm.faces:
-        if not face.select or len(face.loops) == 0:
+        if use_selection and not face.select:
+            continue
+        if len(face.loops) == 0:
             continue
 
         shift_align_attr = face[shiftalign_layer]
@@ -576,12 +694,30 @@ def project_point_onto_plane(point, normal, origin):
     return point - (normal.dot(point - origin))*normal
 
 
-def make_attrs(bm):
+def make_nail_attrs(me, bm):
     if ATTR_SHIFT_ALIGN not in bm.faces.layers.float_vector:
+        if ATTR_SHIFT_ALIGN in me.attributes:
+            # Not in faces.layers.float_vector, but it is in me.attributes, which
+            # implies the attribute already exists with some other domain/type
+            a = me.attributes[ATTR_SHIFT_ALIGN]
+            raise RuntimeError(f"Mesh '{m.name}' has an existing '{ATTR_SHIFT_ALIGN}' attribute that is the wrong domain or type. Expected FACE/FLOAT_VECTOR, got {a.domain}/{a.data_type}. Please remove or rename the existing attribute.")
         bm.faces.layers.float_vector.new(ATTR_SHIFT_ALIGN)
+
     if ATTR_SCALE_ROT not in bm.faces.layers.float_vector:
+        if ATTR_SCALE_ROT in me.attributes:
+            a = me.attributes[ATTR_SCALE_ROT]
+            raise RuntimeError(f"Mesh '{m.name}' has an existing '{ATTR_SCALE_ROT}' attribute that is the wrong domain or type. Expected FACE/FLOAT_VECTOR, got {a.domain}/{a.data_type}. Please remove or rename the existing attribute.")
         bm.faces.layers.float_vector.new(ATTR_SCALE_ROT)
 
+
+def mesh_has_nail_attrs(m):
+    return (ATTR_SHIFT_ALIGN in m.attributes and
+            ATTR_SCALE_ROT   in m.attributes and
+            m.attributes[ATTR_SHIFT_ALIGN].domain    == 'FACE' and
+            m.attributes[ATTR_SCALE_ROT].domain      == 'FACE' and
+            m.attributes[ATTR_SHIFT_ALIGN].data_type == 'FLOAT_VECTOR' and
+            m.attributes[ATTR_SCALE_ROT].data_type   == 'FLOAT_VECTOR')
+           
 
 if __name__ == "__main__":
     main()
