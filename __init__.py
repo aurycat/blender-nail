@@ -24,12 +24,12 @@
 
 
 bl_info = {
-    "name": "Align UV To Grid",
-    "description": "'Align to Grid' option for UVs, which is like working with brushes in a BSP level editor such as Hammer",
+    "name": "Nail UVs",
+    "description": "Implements world-space automatic UV unwrapping similar to Valve's Hammer level editor",
     "author": "aurycat",
     "version": (1, 0),
     "blender": (4, 1, 1), # Minimum tested version. Might work with older.
-    "location": "View3D > UV > Align To Grid",
+    "location": "View3D > Nail (Edit mode)",
     "warning": "",
     "doc_url": "",
     "tracker_url": "",
@@ -38,14 +38,11 @@ bl_info = {
 }
 
 import bpy
-import re
+import bmesh
 import math
 from bpy.types import Operator
-from bpy_extras import view3d_utils
-from mathutils import Vector, Matrix
-import bmesh
-import time
 from bpy.app.handlers import persistent
+from mathutils import Vector, Matrix
 
 # bmesh apparently doesn't have an API for per-face '2D Vector'
 # attributes, so these need to use 'Vector' (float_vector) instead.
@@ -150,7 +147,10 @@ def auto_apply_updated(_, context):
     enable_post_depsgraph_update_handler(auto_apply)
 
 class NailSettings(bpy.types.PropertyGroup):
-    auto_apply: bpy.props.BoolProperty(name="Auto Apply", default=False, update=auto_apply_updated)
+    auto_apply: bpy.props.BoolProperty(name="Auto-Apply Transforms", default=False, update=auto_apply_updated,
+        description="Automatically applies the current transform as objects are transformed or meshes are updated. While in edit mode, only applies to selected faces or their adjacent faces, for efficiency")
+    fast_updates: bpy.props.BoolProperty(name="Fast Update Rate", default=False,
+        description="Makes Auto Apply update faster, potentially slowing down Blender while editing larger meshes")
 
 
 ############
@@ -164,7 +164,9 @@ class NAIL_MT_main_menu(bpy.types.Menu):
     def draw(self, context):
         layout = self.layout
 
-        layout.label(text="Texture Transform", icon='TRANSFORM_ORIGINS')
+        layout.label(text="Nail - Texture Transforms", icon='TRANSFORM_ORIGINS')
+
+        layout.separator()
 
         a = layout.operator(NAIL_OT_set_tex_transform.bl_idname,
             text=NAIL_OT_set_tex_transform.bl_label + " (Default Apply All)")
@@ -189,13 +191,16 @@ class NAIL_MT_main_menu(bpy.types.Menu):
 
         layout.separator()
         layout.operator(NAIL_OT_apply_tex_transform.bl_idname)
-        layout.prop(bpy.context.window_manager.nail_settings, 'auto_apply', text="Auto-Apply Transforms") 
+        layout.prop(bpy.context.window_manager.nail_settings, 'auto_apply')
+        s = layout.split()
+        s.prop(bpy.context.window_manager.nail_settings, 'fast_updates')
+        s.enabled = bpy.context.window_manager.nail_settings.auto_apply
 
         layout.separator()
         layout.operator(NAIL_OT_clear_tex_transform.bl_idname)
 
-        layout.separator()
-        layout.operator(NAIL_OT_unregister.bl_idname)
+#        layout.separator()
+#        layout.operator(NAIL_OT_unregister.bl_idname)
 
 
 ################
@@ -215,20 +220,15 @@ UPDATE_INTERVAL = 1
 # https://blender.stackexchange.com/a/283286/154191
 @persistent
 def on_post_depsgraph_update(scene, depsgraph):
-    self = on_post_depsgraph_update
+    # When fast is set, do the apply every depsgraph update
+    fast = bpy.context.window_manager.nail_settings.fast_updates
 
-    op = bpy.context.active_operator
-    op_changed = op is not self.last_operator
-    self.last_operator = op
-
-    print(op)
-
-    now = time.monotonic()
-    if not (op_changed or self.last_geom_update_time is None or
-            (now - self.last_geom_update_time) > UPDATE_INTERVAL):
-        if not bpy.app.timers.is_registered(geom_update_timer):
-            bpy.app.timers.register(geom_update_timer, first_interval=UPDATE_INTERVAL)
-        return
+    if not fast:
+        self = on_post_depsgraph_update
+        op = bpy.context.active_operator
+        op_changed = op is not self.last_operator
+        self.last_operator = op
+        self.last_obj_list.clear()
 
     for u in depsgraph.updates:
         if not u.is_updated_transform and not u.is_updated_geometry:
@@ -238,86 +238,41 @@ def on_post_depsgraph_update(scene, depsgraph):
         if not mesh_has_nail_attrs(u.id.data):
             continue
 
-        if bpy.app.timers.is_registered(geom_update_timer):
-            bpy.app.timers.unregister(geom_update_timer)
-        
-        self.last_geom_update_time = now
-        apply_tex_transform_one_object(u.id, bpy.context)
+        if fast:
+            apply_tex_transform_one_object(u.id, bpy.context, auto_apply=True)
+        else:
+            self.last_obj_list.append(u.id)
+
+    if not fast and len(self.last_obj_list) > 0:
+        if op_changed:
+            # Operator change indicates the user probably just completed an action,
+            # like finished a Move, mode-switch, etc. We can cancel any timers and
+            # update the objects now. Unfortunately sometimes (seemingly randomly)
+            # modal operations like Move don't send a depsgraph event at the end with
+            # an updated Operator, therefore we won't see an op_changed and we can't
+            # tell the modal operation has ended. In that case, the timer below will
+            # apply the tex transform ~1 second later.
+            if bpy.app.timers.is_registered(geom_update_timer):
+                bpy.app.timers.unregister(geom_update_timer)
+            for obj in self.last_obj_list:
+                apply_tex_transform_one_object(obj, bpy.context, auto_apply=True)
+        else:
+            # Operator was the same as last time. Start a timer to update every second.
+            # Note that during a modal operation like Move, on_post_depsgraph_update
+            # will be called constantly, so the instant the timer fires and self-
+            # unregisters, this will register it again (if the modal operation is
+            # still ongoing).
+            if not bpy.app.timers.is_registered(geom_update_timer):
+                bpy.app.timers.register(geom_update_timer, first_interval=UPDATE_INTERVAL)
 
 
 on_post_depsgraph_update.last_operator = None
-on_post_depsgraph_update.last_geom_update_time = None
+on_post_depsgraph_update.last_obj_list = []
 
 def geom_update_timer():
-    for obj in bpy.context.selected_objects:
-        apply_tex_transform_one_object(obj, bpy.context)
+    for obj in on_post_depsgraph_update.last_obj_list:
+        apply_tex_transform_one_object(obj, bpy.context, auto_apply=True)
     return None
-    
-
-#        if op is None:
-#            return
-##        if 'properties' in op and 'value' in op.properties:
-##            val = op.properties.value
-##            if val is last_operator_value:
-##                retur
-#    last_operator = op
-
-#    geom_updates = [
-#        u.id for u in depsgraph.updates if
-#            (u.is_updated_transform or u.is_updated_geometry)
-#            and u.id is not None and u.id.id_type == 'OBJECT' and u.id.type == 'MESH']
-
-#    if len(geom_updates) > 0:
-#        print(geom_updates)
-#        if op_changed:
-#            print(time.monotonic(), "update")
-#            if bpy.app.timers.is_registered(geom_update_timer):
-#                bpy.app.timers.unregister(geom_update_timer)
-#        else:
-#            if not bpy.app.timers.is_registered(geom_update_timer):
-#                print("register")
-#                bpy.app.timers.register(geom_update_timer, first_interval=1)
-#        on_geometry_change(geom_updates)
-
-##    if op is not None and op.bl_idname == 'TRANSFORM_OT_translate':
-##        print(op.properties.value)
-#    if op is not None and 'value' in op.properties:
-#        print(op.properties.value)
-#    print(geom_updates)
-#    for u in depsgraph.updates:
-#        if not u.is_updated_transform and not u.is_updated_geometry:
-#            continue
-#        if u.id is None or u.id.id_type != 'OBJECT' or u.id.type != 'MESH':
-#            continue
-#        print("mesh changed")
-
-#def geom_update_timer():
-#    print(time.monotonic(), "timer update")
-#    return None
-
-#def on_geometry_change(geom_updates):
-
-
-
-#def depsgraph_update_post_handler(scene, depsgraph):
-#    print(bpy.context.active_operator, bpy.context.active_operator.id_data)
-#    return
-#    print("----")
-#    for u in depsgraph.updates:
-#        if u.id == None or u.id.id_type != 'OBJECT':
-#            continue
-#        if u.id.type != 'MESH':
-#            continue
-#        geom = False
-#        trans = False
-#        if (u.is_updated_geometry):
-#            geom = True
-#        if u.is_updated_transform:
-#            trans = True
-##        print("  ", u.id, u.is_updated_geometry, u.is_updated_shading, u.is_updated_transform)
-
-#        if geom or trans:
-#            print(u.id, "   updated geom:", geom, "    updated trans:", trans)
 
 
 #################
@@ -526,7 +481,7 @@ def set_tex_transform(context, tt):
             bm = bmesh.from_edit_mesh(me)
             make_nail_attrs(me, bm)
             set_tex_transform_one_mesh(bm, tt)
-            apply_tex_transform_one_object(obj, bm)
+            apply_tex_transform_one_mesh(obj, bm, context, auto_apply=False)
             bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
             bm.free()
 
@@ -534,22 +489,22 @@ def set_tex_transform(context, tt):
 def apply_tex_transform(context):
     for obj in context.objects_in_mode:
         if obj.type == 'MESH':
-            apply_tex_transform_one_object(obj, context)
+            apply_tex_transform_one_object(obj, context, auto_apply=False)
 
 
-def apply_tex_transform_one_object(obj, context): # Must be MESH type
+def apply_tex_transform_one_object(obj, context, auto_apply=False): # Must be MESH type
     me = obj.data
     if context.mode == 'EDIT_MESH':
         bm = bmesh.from_edit_mesh(me)
         make_nail_attrs(me, bm)
-        apply_tex_transform_one_mesh(obj, bm, use_selection=True)
+        apply_tex_transform_one_mesh(obj, bm, context, auto_apply=auto_apply)
         bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
         bm.free()
     elif context.mode == 'OBJECT':
         bm = bmesh.new()
         bm.from_mesh(me)
         make_nail_attrs(me, bm)
-        apply_tex_transform_one_mesh(obj, bm,  use_selection=False)
+        apply_tex_transform_one_mesh(obj, bm, context, auto_apply=auto_apply)
         bm.to_mesh(me)
         bm.free()
 
@@ -604,7 +559,7 @@ def set_tex_transform_one_mesh(bm, tt):
                 face[scalerot_layer] = v
 
 
-def apply_tex_transform_one_mesh(obj, bm, use_selection):
+def apply_tex_transform_one_mesh(obj, bm, context, auto_apply=False):
     matrix_world = obj.matrix_world
     rot_world = matrix_world.to_quaternion()
 
@@ -613,10 +568,29 @@ def apply_tex_transform_one_mesh(obj, bm, use_selection):
     scalerot_layer = bm.faces.layers.float_vector[ATTR_SCALE_ROT]
 
     for face in bm.faces:
-        if use_selection and not face.select:
+        if len(face.loops) == 0: # Not sure if this is possible, but safety check anyway
             continue
-        if len(face.loops) == 0:
-            continue
+
+        if auto_apply:
+            if context.mode == 'EDIT_MESH':
+                # In auto-apply mode, apply to selected faces as well as any faces that
+                # have a selected vertex, since they could be affected by the changes
+                if not face.select:
+                    any_selected_verts = False
+                    for v in face.verts:
+                        if v.select:
+                            any_selected_verts = True
+                            break
+                    if not any_selected_verts:
+                        continue
+            else:
+                pass # In object mode, always update all faces
+        else: # Manually applied via menu option
+            if context.mode == 'EDIT_MESH':
+                if not face.select:
+                    continue
+            else:
+                pass # In object mode, always update all faces
 
         shift_align_attr = face[shiftalign_layer]
         scale_rot_attr = face[scalerot_layer]
@@ -687,14 +661,13 @@ def dominant_axis_vec(dax):
                    1 if dax == 2 else 0))
 
 
-# Project 3D Vector 'point' onto the plane made of normalized 3D Vector 'normal'
-# and 3D Vector 'origin'. Returns the closest point on the plane (the projection)
-# as a 3D Vector in the same coordinate system.
-def project_point_onto_plane(point, normal, origin):
-    return point - (normal.dot(point - origin))*normal
-
-
 def make_nail_attrs(me, bm):
+    if len(bm.loops.layers.uv) == 0:
+        bm.loops.layers.uv.new("UVMap")
+    elif bm.loops.layers.uv.active is None:
+        # Not sure if this is possible, but just to be safe
+        raise RuntimeError(f"Mesh '{m.name}' has at least one UV Map, but none are marked 'active'. Please make sure a UVMap is selected on this mesh.")
+
     if ATTR_SHIFT_ALIGN not in bm.faces.layers.float_vector:
         if ATTR_SHIFT_ALIGN in me.attributes:
             # Not in faces.layers.float_vector, but it is in me.attributes, which
@@ -711,7 +684,8 @@ def make_nail_attrs(me, bm):
 
 
 def mesh_has_nail_attrs(m):
-    return (ATTR_SHIFT_ALIGN in m.attributes and
+    return (len(m.uv_layers) > 0 and
+            ATTR_SHIFT_ALIGN in m.attributes and
             ATTR_SCALE_ROT   in m.attributes and
             m.attributes[ATTR_SHIFT_ALIGN].domain    == 'FACE' and
             m.attributes[ATTR_SCALE_ROT].domain      == 'FACE' and
