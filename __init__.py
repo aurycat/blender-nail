@@ -197,7 +197,10 @@ class NAIL_MT_main_menu(bpy.types.Menu):
         a.plane_align = str(TCFLAG_ALIGN_FACE if tt.align_face else 0)
         a.scale = tt.scale
         a.rotation = tt.rotation
-        a.apply = {'SHIFT', 'SCALE', 'ROTATION', 'ALIGNMENT'}
+        if tt.enabled:
+            a.apply = {'SHIFT', 'SCALE', 'ROTATION', 'ALIGNMENT'}
+        else:
+            a.apply = set()
 
         b = layout.operator(NAIL_OT_set_tex_transform.bl_idname,
             text=NAIL_OT_set_tex_transform.bl_label + " (Default Apply None)")
@@ -222,88 +225,52 @@ class NAIL_MT_main_menu(bpy.types.Menu):
 #        layout.operator(NAIL_OT_unregister.bl_idname)
 
 
-################
-### Handlers ###
-################
+##########################
+### Auto-apply handler ###
+##########################
 
 def enable_post_depsgraph_update_handler(enable):
     if enable:
-        if on_post_depsgraph_update not in bpy.app.handlers.depsgraph_update_pre:
-            bpy.app.handlers.depsgraph_update_pre.append(on_post_depsgraph_update)
+        if on_post_depsgraph_update not in bpy.app.handlers.depsgraph_update_post:
+            bpy.app.handlers.depsgraph_update_post.append(on_post_depsgraph_update)
     else:
-        if on_post_depsgraph_update in bpy.app.handlers.depsgraph_update_pre:
-            bpy.app.handlers.depsgraph_update_pre.remove(on_post_depsgraph_update)
+        if on_post_depsgraph_update in bpy.app.handlers.depsgraph_update_post:
+            bpy.app.handlers.depsgraph_update_post.remove(on_post_depsgraph_update)
 
-    if enable:
-        if on_post_depsgraph_update2 not in bpy.app.handlers.depsgraph_update_post:
-            bpy.app.handlers.depsgraph_update_post.append(on_post_depsgraph_update2)
-    else:
-        if on_post_depsgraph_update2 in bpy.app.handlers.depsgraph_update_post:
-            bpy.app.handlers.depsgraph_update_post.remove(on_post_depsgraph_update2)
+UPDATE_INTERVAL = 0.5
 
-#    if enable:
-#        if not bpy.app.timers.is_registered(timer):
-#            bpy.app.timers.register(timer, first_interval=1)
-#    else:
-#        if bpy.app.timers.is_registered(timer):
-#            bpy.app.timers.unregister(timer)
-
-#def timer():
-#    print("timer start")
-#    bmesh.update_edit_mesh(bpy.data.meshes['Cube.001'], loop_triangles=False)
-#    print("timer end")    
-#    return 1
-
-UPDATE_INTERVAL = 1
-
-post_count = 0
-@persistent
-def on_post_depsgraph_update2(scene):
-    global post_count
-    print("postupdate", post_count, bpy.context.active_operator)
-    post_count += 1
-    
 # https://blender.stackexchange.com/a/283286/154191
 count = 0
 @persistent
-def on_post_depsgraph_update(scene):
-    global count
-    print("preupdate start", count)
-    
-    depsgraph = bpy.context.view_layer.depsgraph
-    print("preupdate end", count, bpy.context.active_operator, depsgraph.updates[0].is_updated_transform, depsgraph.updates[0].is_updated_geometry)
-    count += 1
-    return
-    self = on_post_depsgraph_update
+def on_post_depsgraph_update(scene, depsgraph):
+    # Updating the mesh triggers a depsgraph update; prevent infinite loop
+    if on_post_depsgraph_update.timer_ran:
+        on_post_depsgraph_update.timer_ran = False
+        return
 
     # When fast is set, do the apply every depsgraph update
-    fast = bpy.context.window_manager.nail_settings.fast_updates
+    if bpy.context.window_manager.nail_settings.fast_updates:
+        for u in depsgraph.updates:
+            if depsgraph_update_is_applicable(u):
+                do_auto_apply(u.id)
+        return
 
-    if fast:
-        self.last_operator = None
-    else:
-        op = bpy.context.active_operator
-        op_changed = op is not self.last_operator
-        self.last_operator = op
+    self = on_post_depsgraph_update
+
+    op = bpy.context.active_operator
+    op_changed = op is not self.last_operator
+    self.last_operator = op
 
     any_geom_updates = False
 
     for u in depsgraph.updates:
-        if not u.is_updated_transform and not u.is_updated_geometry:
-            continue
-        if u.id is None or u.id.id_type != 'OBJECT' or u.id.type != 'MESH':
-            continue
-        if not NailMesh.is_nail_mesh(u.id.data):
-            continue
-        if not any_geom_updates:
-            any_geom_updates = True
-            self.last_obj_list.clear()
-        if fast:
-            do_auto_apply(u.id)
-        else:
-            self.last_obj_list.append(u.id)
+        if depsgraph_update_is_applicable(u):
+            if not any_geom_updates:
+                any_geom_updates = True
+                self.last_obj_list.clear()
+            self.last_obj_list.append(u.id.original)
 
-    if not fast and any_geom_updates:
+    if any_geom_updates:
         if op_changed:
             # Operator change indicates the user probably just completed an action,
             # like finished a Move, mode-switch, etc. We can cancel any timers and
@@ -325,24 +292,27 @@ def on_post_depsgraph_update(scene):
             if not bpy.app.timers.is_registered(geom_update_timer):
                 bpy.app.timers.register(geom_update_timer, first_interval=UPDATE_INTERVAL)
 
-
 on_post_depsgraph_update.last_operator = None
 on_post_depsgraph_update.last_obj_list = []
+on_post_depsgraph_update.timer_ran = False
+
+def depsgraph_update_is_applicable(u):
+    if not u.is_updated_transform and not u.is_updated_geometry:
+        return False
+    if u.id is None or u.id.id_type != 'OBJECT' or u.id.type != 'MESH':
+        return False
+    if not NailMesh.is_nail_mesh(u.id.data):
+        return False
+    return True
 
 def geom_update_timer():
-#    print("update timer", on_post_depsgraph_update.last_obj_list)
-#    if not bpy.context.window_manager.nail_settings.fast_updates:
-    print("a")
-    print (on_post_depsgraph_update.last_obj_list)
-    print(bpy.context.objects_in_mode)
-    for obj in bpy.context.objects_in_mode:#on_post_depsgraph_update.last_obj_list:
+    on_post_depsgraph_update.timer_ran = True
+    for obj in on_post_depsgraph_update.last_obj_list:
         do_auto_apply(obj)
-    print("b")
     return None
 
 def do_auto_apply(obj):
     with NailMesh(obj) as nm:
-        print("doing auto apply")
         nm.apply_texture(auto_apply=True)
 
 
@@ -667,7 +637,6 @@ class NailMesh:
         self.wrap_uvs = bpy.context.window_manager.nail_settings.wrap_uvs
         self.me = self.obj.data
         if self.me.is_editmode:
-            print("from editmesh")
             self.bm = bmesh.from_edit_mesh(self.me)
         else:
             self.bm = bmesh.new()
@@ -681,10 +650,8 @@ class NailMesh:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        print("__exit__")
         if exc_type is None and self.bm is not None and self.me is not None:
             if self.me.is_editmode:
-                print("update edit mesh")
                 bmesh.update_edit_mesh(self.me, loop_triangles=False, destructive=False)
             else:
                 self.bm.to_mesh(self.me)
