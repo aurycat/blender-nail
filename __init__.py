@@ -27,7 +27,7 @@ bl_info = {
     "name": "Nail UVs",
     "description": "Implements world-space automatic UV unwrapping similar to Valve's Hammer level editor",
     "author": "aurycat",
-    "version": (1, 0),
+    "version": (0, 1),
     "blender": (4, 1, 1), # Minimum tested version. Might work with older.
     "location": "View3D > Nail (Edit mode)",
     "warning": "",
@@ -44,6 +44,11 @@ import enum
 from bpy.types import Operator
 from bpy.app.handlers import persistent
 from mathutils import Vector, Matrix
+
+
+#################
+### Constants ###
+#################
 
 # bmesh apparently doesn't have an API for per-face '2D Vector'
 # attributes, so these need to use 'Vector' (float_vector) instead.
@@ -70,20 +75,7 @@ TCFLAG_ALIGN_FACE = 8     # True to have the UV axis aligned to the face instead
 
 TCFLAG_ALL = TCFLAG_ENABLED | TCFLAG_LOCK_AXIS | TCFLAG_OBJECT_SPACE | TCFLAG_ALIGN_FACE
 
-#ALIGN_NONE = -1       # This plugin will never change the UVs on this face
-#ALIGN_WORLD = 0       # World-space UV alignment. This is like Hammer's default behavior for brushes.
-#                      # (https://developer.valvesoftware.com/wiki/Texture_alignment#World_Alignment)
-#                      # It is effectively a Cube Projection where the center of the "cube" is the
-#                      # world origin, and scale and rotation are identity.
-#ALIGN_OBJECT = 1      # Object-space UV alignment. Again like Cube Projection, except the position,
-#                      # rotation, and scale of the "cube" are that of the object transform.
-#ALIGN_WORLD_FACE = 2  # This is like ALIGN_WORLD, except the "cube" is rotated to be aligned
-#                      # to the normal of the face.
-#ALIGN_OBJECT_FACE = 3 # This is like ALIGN_OBJECT, except the "cube" is rotated to be aligned
-#                      # to the normal of the face.
-#ALIGN_ENABLE_BIT = 1
-#ALIGN_SPACE_BIT = 2
-#ALIGN_PLANE_BIT = 4
+AUTO_APPLY_UPDATE_INTERVAL = 0.5
 
 
 ############
@@ -98,13 +90,23 @@ def main():
             bpy.ops.aurycat.nail_unregister()
     register()
 
+def clss():
+    return (
+        NAIL_OT_set_tex_transform,
+        NAIL_OT_unregister,
+        NAIL_MT_main_menu,
+        NAIL_OT_clear_tex_transform,
+        NAIL_OT_apply_tex_transform,
+        NAIL_OT_mark_nailface,
+        NAIL_OT_clear_nailface,
+        NAIL_OT_mark_axislock,
+        NAIL_OT_clear_axislock,
+        NailSettings,
+    )
+
 def register():
-    bpy.utils.register_class(NAIL_OT_set_tex_transform)
-    bpy.utils.register_class(NAIL_OT_unregister)
-    bpy.utils.register_class(NAIL_MT_main_menu)
-    bpy.utils.register_class(NAIL_OT_clear_tex_transform)
-    bpy.utils.register_class(NAIL_OT_apply_tex_transform)
-    bpy.utils.register_class(NailSettings)
+    for cls in clss():
+        bpy.utils.register_class(cls)
     bpy.types.VIEW3D_PT_view3d_lock.append(draw_lock_rotation)
     bpy.types.VIEW3D_MT_editor_menus.append(nail_draw_main_menu)
 
@@ -120,19 +122,9 @@ def unregister():
 
     bpy.types.VIEW3D_PT_view3d_lock.remove(draw_lock_rotation)
     bpy.types.VIEW3D_MT_editor_menus.remove(nail_draw_main_menu)
-    safe_unregister_class(NAIL_OT_unregister)
-    safe_unregister_class(NAIL_OT_set_tex_transform)
-    safe_unregister_class(NAIL_MT_main_menu)
-    safe_unregister_class(NAIL_OT_clear_tex_transform)
-    safe_unregister_class(NAIL_OT_apply_tex_transform)
-    safe_unregister_class(NailSettings)
-
-# Don't error out if the class wasn't registered
-def safe_unregister_class(cls):
-    try:
-        bpy.utils.unregister_class(cls)
-    except RuntimeError:
-        pass
+    for cls in clss():
+        try: bpy.utils.unregister_class(cls)
+        except RuntimeError: pass
 
 class NAIL_OT_unregister(Operator):
     bl_idname = "aurycat.nail_unregister"
@@ -185,22 +177,30 @@ class NAIL_MT_main_menu(bpy.types.Menu):
     def draw(self, context):
         layout = self.layout
 
-        layout.label(text="Nail - Texture Transforms", icon='TRANSFORM_ORIGINS')
+        layout.label(text="Enable / Disable Nail (per face)", icon='TOOL_SETTINGS')
+        layout.operator(NAIL_OT_mark_nailface.bl_idname)
+        layout.operator(NAIL_OT_clear_nailface.bl_idname)
 
         layout.separator()
-
-        layout.operator(NAIL_OT_set_tex_transform.bl_idname,
-            text=NAIL_OT_set_tex_transform.bl_label)
-
-        layout.separator()
+        layout.label(text="Edit Texture Transforms", icon='UV_DATA')
+        layout.operator(NAIL_OT_set_tex_transform.bl_idname)
+        layout.operator(NAIL_OT_clear_tex_transform.bl_idname)
         layout.operator(NAIL_OT_apply_tex_transform.bl_idname)
+
+        layout.separator()
+        layout.label(text="Axis Lock", icon='LOCKED')
+        layout.operator(NAIL_OT_mark_axislock.bl_idname)
+        layout.operator(NAIL_OT_clear_axislock.bl_idname)
+
+        layout.separator()
+        layout.label(text="Auto-Apply", icon='PROP_ON')
+
         layout.prop(bpy.context.window_manager.nail_settings, 'auto_apply')
         s = layout.split()
         s.prop(bpy.context.window_manager.nail_settings, 'fast_updates')
         s.enabled = bpy.context.window_manager.nail_settings.auto_apply
 
-        layout.separator()
-        layout.operator(NAIL_OT_clear_tex_transform.bl_idname)
+
 
 #        layout.separator()
 #        layout.operator(NAIL_OT_unregister.bl_idname)
@@ -218,10 +218,7 @@ def enable_post_depsgraph_update_handler(enable):
         if on_post_depsgraph_update in bpy.app.handlers.depsgraph_update_post:
             bpy.app.handlers.depsgraph_update_post.remove(on_post_depsgraph_update)
 
-UPDATE_INTERVAL = 0.5
-
 # https://blender.stackexchange.com/a/283286/154191
-count = 0
 @persistent
 def on_post_depsgraph_update(scene, depsgraph):
     # Updating the mesh triggers a depsgraph update; prevent infinite loop
@@ -271,7 +268,7 @@ def on_post_depsgraph_update(scene, depsgraph):
             # unregisters, this will register it again (if the modal operation is
             # still ongoing).
             if not bpy.app.timers.is_registered(geom_update_timer):
-                bpy.app.timers.register(geom_update_timer, first_interval=UPDATE_INTERVAL)
+                bpy.app.timers.register(geom_update_timer, first_interval=AUTO_APPLY_UPDATE_INTERVAL)
 
 on_post_depsgraph_update.last_operator = None
 on_post_depsgraph_update.last_obj_list = []
@@ -305,22 +302,7 @@ def shared_poll(self, context):
     if context.mode != 'EDIT_MESH':
         self.poll_message_set("Must be run in Edit Mode")
         return False
-    obj = context.active_object
-    if obj is None or obj.type != 'MESH':
-        self.poll_message_set("Must have an active (selected) mesh object")
-        return False
     return True
-
-
-#in_update = False
-#def update_apply(self, key):
-#    global in_update
-#    if not in_update:
-#        try:
-#            in_update = True
-#            self.apply = self.apply.union({key})
-#        finally:
-#            in_update = False
 
 
 class NAIL_OT_set_tex_transform(Operator):
@@ -379,11 +361,16 @@ class NAIL_OT_set_tex_transform(Operator):
         items=plane_align_items,
         default='unset')
 
-    force_enable: bpy.props.BoolProperty(name="Force Enable", options={'HIDDEN'})
-
     @classmethod
     def poll(cls, context):
         return shared_poll(cls, context)
+
+#    def draw(self, context):
+#        layout = self.layout
+#        layout.use_property_split = True
+#        layout.use_property_decorate = False
+#        layout.prop(self, "shift")
+#        layout.
 
     def execute(self, context):
         if ( self.set_shift or
@@ -393,9 +380,6 @@ class NAIL_OT_set_tex_transform(Operator):
              self.plane_align != 'unset' ):
             tc = TextureConfig()
 
-            if self.force_enable:
-                tc.flags_set |= TCFLAG_ENABLED
-                tc.flags |= TCFLAG_ENABLED
             if self.space_align != 'unset':
                 tc.flags_set |= TCFLAG_OBJECT_SPACE
                 tc.flags |= int(self.space_align)
@@ -410,7 +394,6 @@ class NAIL_OT_set_tex_transform(Operator):
             if self.set_scale:
                 tc.rotation = self.rotation
 
-            print("write", tc)
             for obj in context.objects_in_mode:
                 if obj.type == 'MESH':
                     with NailMesh(obj) as nm:
@@ -420,16 +403,24 @@ class NAIL_OT_set_tex_transform(Operator):
         return {'FINISHED'}
 
     def invoke(self, context, event):
-        tc = TextureConfig.from_selected()
+        any_selected_faces = [False] # In an array to "pass by reference"
+        tc = TextureConfig.from_selected(out_any_selected=any_selected_faces)
+
+        if not any_selected_faces[0]:
+            self.report({'WARNING'}, "No selected faces")
+            return {'CANCELLED'}
 
         if not tc.multiple_faces:
             # This implies that no enabled faces were selected
             # Use the default config with enabled set so that these faces become enabled
-            # (If no faces were selected at all, then this operator will do nothing anyway!)
             tc = TextureConfig.cleared()
-            self.force_enable = True
-        else:
-            self.force_enable = False
+            tc.flags |= TCFLAG_ENABLED
+            tc.flags_set |= TCFLAG_ENABLED
+            for obj in context.objects_in_mode:
+                if obj.type == 'MESH':
+                    with NailMesh(obj) as nm:
+                        nm.set_texture_config(tc)
+                        nm.apply_texture()
 
         if (tc.flags_set & TCFLAG_OBJECT_SPACE) == TCFLAG_OBJECT_SPACE:
             self.space_align = str(tc.flags & TCFLAG_OBJECT_SPACE)
@@ -462,9 +453,9 @@ class NAIL_OT_set_tex_transform(Operator):
 
 class NAIL_OT_apply_tex_transform(Operator):
     bl_idname = "aurycat.nail_apply_tex_transform"
-    bl_label = "Apply Current Transform"
+    bl_label = "Reapply Transform"
     bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Reapplies the selected faces' texture transforms. Useful to run after moving or modifying faces"
+    bl_description = "Reapplies the selected faces' texture transforms. Useful to run after moving or modifying faces. Only necessary if auto-apply transforms is off"
 
     @classmethod
     def poll(cls, context):
@@ -482,17 +473,104 @@ class NAIL_OT_clear_tex_transform(Operator):
     bl_idname = "aurycat.nail_clear_tex_transform"
     bl_label = "Clear Transform"
     bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Clears texture transforms for the selected faces, so they are no longer affected by Nail"
+    bl_description = "Clears texture transforms to default values"
 
     @classmethod
     def poll(cls, context):
         return shared_poll(cls, context)
 
     def execute(self, context):
+        tc = TextureConfig.cleared()
+        tc.flags_set &= ~TCFLAG_ENABLED # Don't change enabled state
         for obj in context.objects_in_mode:
             if obj.type == 'MESH':
                 with NailMesh(obj) as nm:
-                    nm.set_texture_config(TextureConfig.cleared())
+                    nm.set_texture_config(tc)
+                    nm.apply_texture()
+        return {'FINISHED'}
+
+
+class NAIL_OT_mark_nailface(Operator):
+    bl_idname = "aurycat.nail_mark_nailface"
+    bl_label = "Mark NailFace"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Enables Nail on the selected faces"
+
+    @classmethod
+    def poll(cls, context):
+        return shared_poll(cls, context)
+
+    def execute(self, context):
+        tc = TextureConfig()
+        tc.flags_set |= TCFLAG_ENABLED
+        tc.flags |= TCFLAG_ENABLED
+        for obj in context.objects_in_mode:
+            if obj.type == 'MESH':
+                with NailMesh(obj) as nm:
+                    nm.set_texture_config(tc)
+                    nm.apply_texture()
+        return {'FINISHED'}
+
+
+class NAIL_OT_clear_nailface(Operator):
+    bl_idname = "aurycat.nail_clear_nailface"
+    bl_label = "Clear NailFace"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Disables Nail on the selected faces"
+
+    @classmethod
+    def poll(cls, context):
+        return shared_poll(cls, context)
+
+    def execute(self, context):
+        tc = TextureConfig()
+        tc.flags_set |= TCFLAG_ENABLED
+        for obj in context.objects_in_mode:
+            if obj.type == 'MESH':
+                with NailMesh(obj) as nm:
+                    nm.set_texture_config(tc)
+        return {'FINISHED'}
+
+
+class NAIL_OT_mark_axislock(Operator):
+    bl_idname = "aurycat.nail_mark_axislock"
+    bl_label = "Mark Axis Lock"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Locks the current transform axis on the given faces; 'face' or 'axis' alignment will stop affecting these faces until unlocked"
+
+    @classmethod
+    def poll(cls, context):
+        return shared_poll(cls, context)
+
+    def execute(self, context):
+        tc = TextureConfig()
+        tc.flags_set |= TCFLAG_LOCK_AXIS
+        tc.flags |= TCFLAG_LOCK_AXIS
+        for obj in context.objects_in_mode:
+            if obj.type == 'MESH':
+                with NailMesh(obj) as nm:
+                    nm.set_texture_config(tc)
+        return {'FINISHED'}
+
+
+class NAIL_OT_clear_axislock(Operator):
+    bl_idname = "aurycat.nail_clear_axislock"
+    bl_label = "Clear Axis Lock"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Clears axis lock on the selected faces"
+
+    @classmethod
+    def poll(cls, context):
+        return shared_poll(cls, context)
+
+    def execute(self, context):
+        tc = TextureConfig()
+        tc.flags_set |= TCFLAG_LOCK_AXIS
+        for obj in context.objects_in_mode:
+            if obj.type == 'MESH':
+                with NailMesh(obj) as nm:
+                    nm.set_texture_config(tc)
+                    nm.apply_texture()
         return {'FINISHED'}
 
 
@@ -618,12 +696,12 @@ class TextureConfig:
 
     # None/unset values in the result means different faces had different values
     @classmethod
-    def from_selected(cls):
+    def from_selected(cls, out_any_selected=[False]):
         tc = TextureConfig()
         for obj in bpy.context.selected_objects:
             if NailMesh.is_nail_object(obj):
                 with NailMesh(obj, readonly=True) as nm:
-                    nm.get_texture_config(tc)
+                    nm.get_texture_config(tc, out_any_selected=out_any_selected)
         return tc
 
     def __repr__(self):
@@ -719,10 +797,7 @@ class NailMesh:
         # Any set flags from tc will overwrite existing flags
         # Any others will remain unchanged
         flags = int(shift_flags_attr.z)
-#        print("before:", repr_flags(flags))
-#        print("want  :", repr_flags(tc.flags), repr_flags(tc.flags_set))
         new_flags = (flags & ~tc.flags_set) | (tc.flags & tc.flags_set)
-#        print("new   :", repr_flags(new_flags))
         shift_flags_attr.z = float(new_flags)
 
         if tc.shift is not None:
@@ -735,11 +810,12 @@ class NailMesh:
     # tc is an in-out parameter
     # Pass in a blank TextureConfig to start with, multiple objects can
     # be collected together by passing the same tc back in each time
-    def get_texture_config(self, tc, only_selected=True):
+    def get_texture_config(self, tc, only_selected=True, out_any_selected=[False]):
         only_selected = self.me.is_editmode and only_selected
         for face in self.bm.faces:
             if only_selected and not face.select:
                 continue
+            out_any_selected[0] = True
             if self.get_texture_config_one_face(face, tc):
                 tc.multiple_faces = True
 
@@ -756,7 +832,6 @@ class NailMesh:
         if tc.multiple_faces:
             # Find all the bits that are different between tc.flags and flags
             flag_diff = tc.flags ^ flags
-            # Clear them from tc.flags and mark them unset
             tc.flags &= ~flag_diff
             tc.flags_set &= ~flag_diff
 
@@ -776,7 +851,6 @@ class NailMesh:
             tc.shift = shift_flags_attr.xy
             tc.scale = validate_scale(scale_rot_attr.xy)
             tc.rotation = scale_rot_attr.z
-#            print("read", tc)
 
         return True
 
@@ -828,9 +902,13 @@ class NailMesh:
         # If axis lock is set for this face, reuse existing UV Axis (which
         # implies not checking the align_face flag). But still apply the
         # shift, scale, and rotation.
-        axis_lock = ((flags & TCFLAG_LOCK_AXIS) == TCFLAG_LOCK_AXIS and
-                     # If axes aren't set yet, ignore axis lock
-                     not (vec_is_zero(uaxis_attr) or vec_is_zero(vaxis_atr)))
+        axis_lock = (flags & TCFLAG_LOCK_AXIS) == TCFLAG_LOCK_AXIS
+        
+        if axis_lock:
+            uaxis = face[self.uaxis_layer]
+            vaxis = face[self.vaxis_layer]
+            if vec_is_zero(uaxis) or vec_is_zero(vaxis):
+                axis_lock = False
 
         if axis_lock:
             uaxis = face[self.uaxis_layer]
