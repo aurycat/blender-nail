@@ -200,8 +200,6 @@ class NAIL_MT_main_menu(bpy.types.Menu):
         s.prop(bpy.context.window_manager.nail_settings, 'fast_updates')
         s.enabled = bpy.context.window_manager.nail_settings.auto_apply
 
-
-
 #        layout.separator()
 #        layout.operator(NAIL_OT_unregister.bl_idname)
 
@@ -394,11 +392,7 @@ class NAIL_OT_set_tex_transform(Operator):
             if self.set_scale:
                 tc.rotation = self.rotation
 
-            for obj in context.objects_in_mode:
-                if obj.type == 'MESH':
-                    with NailMesh(obj) as nm:
-                        nm.set_texture_config(tc)
-                        nm.apply_texture()
+            set_or_apply_selected_faces(tc, context, set=True, apply=True)
                 
         return {'FINISHED'}
 
@@ -416,11 +410,7 @@ class NAIL_OT_set_tex_transform(Operator):
             tc = TextureConfig.cleared()
             tc.flags |= TCFLAG_ENABLED
             tc.flags_set |= TCFLAG_ENABLED
-            for obj in context.objects_in_mode:
-                if obj.type == 'MESH':
-                    with NailMesh(obj) as nm:
-                        nm.set_texture_config(tc)
-                        nm.apply_texture()
+            set_or_apply_selected_faces(tc, context, set=True, apply=True)
 
         if (tc.flags_set & TCFLAG_OBJECT_SPACE) == TCFLAG_OBJECT_SPACE:
             self.space_align = str(tc.flags & TCFLAG_OBJECT_SPACE)
@@ -462,10 +452,7 @@ class NAIL_OT_apply_tex_transform(Operator):
         return shared_poll(cls, context)
 
     def execute(self, context):
-        for obj in context.objects_in_mode:
-            if obj.type == 'MESH':
-                with NailMesh(obj) as nm:
-                    nm.apply_texture()
+        set_or_apply_selected_faces(None, context, set=False, apply=True)
         return {'FINISHED'}
 
 
@@ -482,11 +469,7 @@ class NAIL_OT_clear_tex_transform(Operator):
     def execute(self, context):
         tc = TextureConfig.cleared()
         tc.flags_set &= ~TCFLAG_ENABLED # Don't change enabled state
-        for obj in context.objects_in_mode:
-            if obj.type == 'MESH':
-                with NailMesh(obj) as nm:
-                    nm.set_texture_config(tc)
-                    nm.apply_texture()
+        set_or_apply_selected_faces(tc, context, set=True, apply=True)
         return {'FINISHED'}
 
 
@@ -504,11 +487,7 @@ class NAIL_OT_mark_nailface(Operator):
         tc = TextureConfig()
         tc.flags_set |= TCFLAG_ENABLED
         tc.flags |= TCFLAG_ENABLED
-        for obj in context.objects_in_mode:
-            if obj.type == 'MESH':
-                with NailMesh(obj) as nm:
-                    nm.set_texture_config(tc)
-                    nm.apply_texture()
+        set_or_apply_selected_faces(tc, context, set=True, apply=True)
         return {'FINISHED'}
 
 
@@ -525,10 +504,7 @@ class NAIL_OT_clear_nailface(Operator):
     def execute(self, context):
         tc = TextureConfig()
         tc.flags_set |= TCFLAG_ENABLED
-        for obj in context.objects_in_mode:
-            if obj.type == 'MESH':
-                with NailMesh(obj) as nm:
-                    nm.set_texture_config(tc)
+        set_or_apply_selected_faces(tc, context, set=True, apply=False)
         return {'FINISHED'}
 
 
@@ -546,10 +522,7 @@ class NAIL_OT_mark_axislock(Operator):
         tc = TextureConfig()
         tc.flags_set |= TCFLAG_LOCK_AXIS
         tc.flags |= TCFLAG_LOCK_AXIS
-        for obj in context.objects_in_mode:
-            if obj.type == 'MESH':
-                with NailMesh(obj) as nm:
-                    nm.set_texture_config(tc)
+        set_or_apply_selected_faces(tc, context, set=True, apply=False)
         return {'FINISHED'}
 
 
@@ -566,11 +539,7 @@ class NAIL_OT_clear_axislock(Operator):
     def execute(self, context):
         tc = TextureConfig()
         tc.flags_set |= TCFLAG_LOCK_AXIS
-        for obj in context.objects_in_mode:
-            if obj.type == 'MESH':
-                with NailMesh(obj) as nm:
-                    nm.set_texture_config(tc)
-                    nm.apply_texture()
+        set_or_apply_selected_faces(tc, context, set=True, apply=True)
         return {'FINISHED'}
 
 
@@ -661,6 +630,15 @@ def validate_scale(s):
 
 def repr_flags(f):
     return f"{f:04b}" if f is not None else "None"
+
+def set_or_apply_selected_faces(tc, context, set=False, apply=False):
+    for obj in context.objects_in_mode:
+        if obj.type == 'MESH':
+            with NailMesh(obj) as nm:
+                if set:
+                    nm.set_texture_config(tc)
+                if apply:
+                    nm.apply_texture()
 
 
 ############
