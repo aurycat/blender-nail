@@ -59,10 +59,10 @@ from mathutils import Vector, Matrix
 # Rotation is stored in radians
 ATTR_SHIFT_FLAGS = "Nail_ShiftFlags" # per-face Vector(X Shift, Y Shift, Flags)
 ATTR_SCALE_ROT   = "Nail_ScaleRot"   # per-face Vector(X Scale, Y Scale, Rotation)
-ATTR_UAXIS       = "Nail_UAxis"      # per-face Vector U axis
-ATTR_VAXIS       = "Nail_VAxis"      # per-face Vector V axis
+#ATTR_UAXIS       = "Nail_UAxis"      # per-face Vector U axis
+#ATTR_VAXIS       = "Nail_VAxis"      # per-face Vector V axis
 
-FACE_FLOAT_VECTOR_ATTRS = [ATTR_SHIFT_FLAGS, ATTR_SCALE_ROT, ATTR_UAXIS, ATTR_VAXIS]
+FACE_FLOAT_VECTOR_ATTRS = [ATTR_SHIFT_FLAGS, ATTR_SCALE_ROT] #, ATTR_UAXIS, ATTR_VAXIS]
 
 # TextureConfig flags. The bitmask is stored per-face, in the z coordinate of Nail_ShiftFlags
 TCFLAG_ENABLED = 1        # True to use Nail on this face, otherwise Nail will ignore it.
@@ -92,7 +92,7 @@ def main():
 
 def clss():
     return (
-        NAIL_OT_set_tex_transform,
+        NAIL_OT_edit_tex_transform,
         NAIL_OT_unregister,
         NAIL_MT_main_menu,
         NAIL_OT_clear_tex_transform,
@@ -183,7 +183,7 @@ class NAIL_MT_main_menu(bpy.types.Menu):
 
         layout.separator()
         layout.label(text="Edit Texture Transforms", icon='UV_DATA')
-        layout.operator(NAIL_OT_set_tex_transform.bl_idname)
+        layout.operator(NAIL_OT_edit_tex_transform.bl_idname)
         layout.operator(NAIL_OT_clear_tex_transform.bl_idname)
         layout.operator(NAIL_OT_apply_tex_transform.bl_idname)
 
@@ -303,9 +303,9 @@ def shared_poll(self, context):
     return True
 
 
-class NAIL_OT_set_tex_transform(Operator):
-    bl_idname = "aurycat.nail_set_tex_transform"
-    bl_label = "Set Transform"
+class NAIL_OT_edit_tex_transform(Operator):
+    bl_idname = "aurycat.nail_edit_tex_transform"
+    bl_label = "Edit Transform"
     bl_options = {"REGISTER", "UNDO"}
     bl_description = "Sets the texture shift, scale, and/or rotation for all selected faces to the chosen value. The default values are that of the active face"
 
@@ -397,7 +397,7 @@ class NAIL_OT_set_tex_transform(Operator):
         return {'FINISHED'}
 
     def invoke(self, context, event):
-        any_selected_faces = [False] # In an array to "pass by reference"
+        any_selected_faces = [False] # Bool in an array to "pass by reference"
         tc = TextureConfig.from_selected(out_any_selected=any_selected_faces)
 
         if not any_selected_faces[0]:
@@ -640,6 +640,18 @@ def set_or_apply_selected_faces(tc, context, set=False, apply=False):
                 if apply:
                     nm.apply_texture()
 
+def mesh_has_any_selected_faces(me): # must be in editmode
+    bm = bmesh.from_edit_mesh(me)
+    try:
+        if bm.faces.active is not None and bm.faces.active.select:
+            return True
+        for face in bm.faces:
+            if face.select:
+                return True
+    finally:
+        bm.free()
+    return False
+
 
 ############
 ### Main ###
@@ -673,6 +685,7 @@ class TextureConfig:
         return tc
 
     # None/unset values in the result means different faces had different values
+    # Also this function has a side gig of checking if any faces are selected at all
     @classmethod
     def from_selected(cls, out_any_selected=[False]):
         tc = TextureConfig()
@@ -680,6 +693,8 @@ class TextureConfig:
             if NailMesh.is_nail_object(obj):
                 with NailMesh(obj, readonly=True) as nm:
                     nm.get_texture_config(tc, out_any_selected=out_any_selected)
+            elif not out_any_selected[0] and obj.type == 'MESH' and obj.data.is_editmode:
+                out_any_selected[0] = mesh_has_any_selected_faces(obj.data)
         return tc
 
     def __repr__(self):
@@ -713,8 +728,8 @@ class NailMesh:
         self.uv_layer = self.bm.loops.layers.uv.active
         self.shift_flags_layer = self.bm.faces.layers.float_vector[ATTR_SHIFT_FLAGS]
         self.scale_rot_layer = self.bm.faces.layers.float_vector[ATTR_SCALE_ROT]
-        self.uaxis_layer = self.bm.faces.layers.float_vector[ATTR_UAXIS]
-        self.vaxis_layer = self.bm.faces.layers.float_vector[ATTR_VAXIS]
+#        self.uaxis_layer = self.bm.faces.layers.float_vector[ATTR_UAXIS]
+#        self.vaxis_layer = self.bm.faces.layers.float_vector[ATTR_VAXIS]
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -882,16 +897,17 @@ class NailMesh:
         # shift, scale, and rotation.
         axis_lock = (flags & TCFLAG_LOCK_AXIS) == TCFLAG_LOCK_AXIS
         
-        if axis_lock:
-            uaxis = face[self.uaxis_layer]
-            vaxis = face[self.vaxis_layer]
-            if vec_is_zero(uaxis) or vec_is_zero(vaxis):
-                axis_lock = False
+#        if axis_lock:
+#            uaxis = face[self.uaxis_layer]
+#            vaxis = face[self.vaxis_layer]
+#            if vec_is_zero(uaxis) or vec_is_zero(vaxis):
+#                axis_lock = False
 
-        if axis_lock:
-            uaxis = face[self.uaxis_layer]
-            vaxis = face[self.vaxis_layer]
-        else:
+#        if axis_lock:
+#            uaxis = face[self.uaxis_layer]
+#            vaxis = face[self.vaxis_layer]
+#        else:
+        if True:
             # TODO: Investigate what happens if smooth shading is on!
             # I think normals need to be unsmoothed for this to work right
             normal = face.normal
@@ -912,8 +928,8 @@ class NailMesh:
             else:
                 uaxis = RIGHT_VECTORS[orientation]
 
-            face[self.uaxis_layer] = uaxis
-            face[self.vaxis_layer] = vaxis
+#            face[self.uaxis_layer] = uaxis
+#            face[self.vaxis_layer] = vaxis
 
         uv_layer = self.uv_layer
         for loop in face.loops:
