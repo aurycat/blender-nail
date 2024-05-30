@@ -101,6 +101,7 @@ def clss():
         NAIL_OT_clear_nailface,
         NAIL_OT_mark_axislock,
         NAIL_OT_clear_axislock,
+        NAIL_OT_copy_active_to_selected,
         NailSettings,
     )
 
@@ -186,6 +187,7 @@ class NAIL_MT_main_menu(bpy.types.Menu):
         layout.operator(NAIL_OT_edit_tex_transform.bl_idname)
         layout.operator(NAIL_OT_clear_tex_transform.bl_idname)
         layout.operator(NAIL_OT_apply_tex_transform.bl_idname)
+        layout.operator(NAIL_OT_copy_active_to_selected.bl_idname)
 
         layout.separator()
         layout.label(text="Axis Lock", icon='LOCKED')
@@ -307,7 +309,7 @@ class NAIL_OT_edit_tex_transform(Operator):
     bl_idname = "aurycat.nail_edit_tex_transform"
     bl_label = "Edit Transform"
     bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Sets the texture shift, scale, and/or rotation for all selected faces to the chosen value. The default values are that of the active face"
+    bl_description = "Edits the texture shift, scale, rotation, and/or alignment for all selected NailFaces to the chosen values. The default values are that of the active face. If no selected faces are NailFaces, they are all automatically marked NailFace"
 
     set_shift: bpy.props.BoolProperty(name="Set Shift")
 
@@ -398,7 +400,7 @@ class NAIL_OT_edit_tex_transform(Operator):
 
     def invoke(self, context, event):
         any_selected_faces = [False] # Bool in an array to "pass by reference"
-        tc = TextureConfig.from_selected(out_any_selected=any_selected_faces)
+        tc = TextureConfig.from_selected_faces(out_any_selected=any_selected_faces)
 
         if not any_selected_faces[0]:
             self.report({'WARNING'}, "No selected faces")
@@ -445,7 +447,7 @@ class NAIL_OT_apply_tex_transform(Operator):
     bl_idname = "aurycat.nail_apply_tex_transform"
     bl_label = "Reapply Transform"
     bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Reapplies the selected faces' texture transforms. Useful to run after moving or modifying faces. Only necessary if auto-apply transforms is off"
+    bl_description = "Reapplies the selected NailFaces' texture transforms. Useful to run after moving or modifying faces. Only necessary if auto-apply transforms is off"
 
     @classmethod
     def poll(cls, context):
@@ -512,7 +514,7 @@ class NAIL_OT_mark_axislock(Operator):
     bl_idname = "aurycat.nail_mark_axislock"
     bl_label = "Mark Axis Lock"
     bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Locks the current transform axis on the given faces; 'face' or 'axis' alignment will stop affecting these faces until unlocked"
+    bl_description = "Locks the current transform axis on the selected NailFaces; 'face' or 'axis' alignment will stop affecting these faces until unlocked"
 
     @classmethod
     def poll(cls, context):
@@ -530,7 +532,7 @@ class NAIL_OT_clear_axislock(Operator):
     bl_idname = "aurycat.nail_clear_axislock"
     bl_label = "Clear Axis Lock"
     bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Clears axis lock on the selected faces"
+    bl_description = "Clears axis lock on the selected NailFaces"
 
     @classmethod
     def poll(cls, context):
@@ -539,6 +541,27 @@ class NAIL_OT_clear_axislock(Operator):
     def execute(self, context):
         tc = TextureConfig()
         tc.flags_set |= TCFLAG_LOCK_AXIS
+        set_or_apply_selected_faces(tc, context, set=True, apply=True)
+        return {'FINISHED'}
+
+class NAIL_OT_copy_active_to_selected(Operator):
+    bl_idname = "aurycat.nail_copy_active_to_selected"
+    bl_label = "Copy Active to Selected"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Copies the texture transform of the active selected NailFace to all other selected NailFaces"
+
+    @classmethod
+    def poll(cls, context):
+        return shared_poll(cls, context)
+
+    def execute(self, context):
+        tc, errmsg = TextureConfig.from_active_face()
+        if errmsg != None:
+            self.report({'ERROR'}, errmsg)
+            return {'CANCELLED'}
+
+        tc.flags_set &= ~TCFLAG_ENABLED
+        tc.flags_set &= ~TCFLAG_LOCK_AXIS
         set_or_apply_selected_faces(tc, context, set=True, apply=True)
         return {'FINISHED'}
 
@@ -687,7 +710,7 @@ class TextureConfig:
     # None/unset values in the result means different faces had different values
     # Also this function has a side gig of checking if any faces are selected at all
     @classmethod
-    def from_selected(cls, out_any_selected=[False]):
+    def from_selected_faces(cls, out_any_selected=[False]):
         tc = TextureConfig()
         for obj in bpy.context.selected_objects:
             if NailMesh.is_nail_object(obj):
@@ -696,6 +719,22 @@ class TextureConfig:
             elif not out_any_selected[0] and obj.type == 'MESH' and obj.data.is_editmode:
                 out_any_selected[0] = mesh_has_any_selected_faces(obj.data)
         return tc
+
+    # Returns (tc, None) or (None, error_message_str)
+    @classmethod
+    def from_active_face(cls):
+        active = bpy.context.active_object
+        if active is None or active.type != 'MESH' or not active.data.is_editmode:
+            return None, "No active mesh in edit mode"
+        if not NailMesh.is_nail_object(active):
+            return None, "Active mesh is not a Nail mesh"
+        with NailMesh(active, readonly=True) as nm:
+            if nm.bm.faces.active is None or not nm.bm.faces.active.select:
+                return None, "No active selected face"
+            tc = TextureConfig()
+            if not nm.get_texture_config_one_face(nm.bm.faces.active, tc):
+                return None, "Active face is not a NailFace"
+            return tc, None
 
     def __repr__(self):
         f  = repr_flags(self.flags)
