@@ -190,7 +190,7 @@ class NAIL_MT_main_menu(bpy.types.Menu):
         layout.operator(NAIL_OT_copy_active_to_selected.bl_idname)
 
         layout.separator()
-        layout.label(text="Axis Lock", icon='LOCKED')
+        layout.label(text="Texture Lock", icon='LOCKED')
         layout.operator(NAIL_OT_mark_axislock.bl_idname)
         layout.operator(NAIL_OT_clear_axislock.bl_idname)
 
