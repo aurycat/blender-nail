@@ -976,11 +976,25 @@ class NailMesh:
         else:
             uaxis = RIGHT_VECTORS[orientation]
 
-        orig = face.calc_center_median()
+#        orig = face.calc_center_median()
 
-        draw_vec(orig, uaxis, (0,1,0))
-        draw_vec(orig, vaxis, (0,0,1))
+#        edge0_verts = face.edges[0].verts
+#        edge0_center = (edge0_verts[0].co + edge0_verts[1].co)/2
+#        tangent = edge0_center - orig
+#        tangent = face.calc_tangent_edge()
+#        if world_space:
+#            tangent = self.rot_world @ tangent
 
+#        bitangent = normal.cross(tangent)
+
+#        draw_vec(orig, normal, (1,0,0))
+#        draw_vec(orig, tangent, (0,1,0))
+#        draw_vec(orig, bitangent, (0,0,1))
+
+#        sc = math.sqrt(face.calc_area())/2
+#        draw_vec(orig, uaxis*sc, (0,1,0))
+#        draw_vec(orig, vaxis*sc, (0,0,1))
+ 
         uv_layer = self.uv_layer
         for loop in face.loops:
             vert_coord = loop.vert.co
@@ -988,7 +1002,6 @@ class NailMesh:
                 vert_coord = self.matrix_world @ vert_coord
 
             uv_coord = Vector((vert_coord.dot(uaxis), vert_coord.dot(vaxis)))
-#            loop[baseuv_layer].xy = uv_coord
             uv_coord.rotate(rotation_mat)
             uv_coord *= scale
             uv_coord += shift
