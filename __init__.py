@@ -62,7 +62,15 @@ ATTR_SCALE_ROT   = "Nail_ScaleRot"   # per-face Vector(X Scale, Y Scale, Rotatio
 #ATTR_UAXIS       = "Nail_UAxis"      # per-face Vector U axis
 #ATTR_VAXIS       = "Nail_VAxis"      # per-face Vector V axis
 
+# This is stored as a 3D Vector instead of a 2D Vector, because per-corner
+# 2D Float Vectors are automatically considered UV maps and show up in the
+# UV Maps list. That's not good because the user shouldn't be able to edit
+# this attribute while Nail is active. So use 3D Vector instead.
+ATTR_BASEUV      = "Nail_BaseUV"     # per-corner (aka loop) Vector(U, V, Unused)
+
 FACE_FLOAT_VECTOR_ATTRS = [ATTR_SHIFT_FLAGS, ATTR_SCALE_ROT] #, ATTR_UAXIS, ATTR_VAXIS]
+CORNER_FLOAT_VECTOR_ATTRS = [ATTR_BASEUV]
+
 
 # TextureConfig flags. The bitmask is stored per-face, in the z coordinate of Nail_ShiftFlags
 TCFLAG_ENABLED = 1        # True to use Nail on this face, otherwise Nail will ignore it.
@@ -765,10 +773,9 @@ class NailMesh:
         if not self.readonly:
             self.init_attrs()
         self.uv_layer = self.bm.loops.layers.uv.active
+        self.baseuv_layer = self.bm.loops.layers.float_vector[ATTR_BASEUV]
         self.shift_flags_layer = self.bm.faces.layers.float_vector[ATTR_SHIFT_FLAGS]
         self.scale_rot_layer = self.bm.faces.layers.float_vector[ATTR_SCALE_ROT]
-#        self.uaxis_layer = self.bm.faces.layers.float_vector[ATTR_UAXIS]
-#        self.vaxis_layer = self.bm.faces.layers.float_vector[ATTR_VAXIS]
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -798,6 +805,13 @@ class NailMesh:
                     raise RuntimeError(f"Mesh '{self.me.name}' has an existing '{attr}' attribute that is the wrong domain or type. Expected FACE/FLOAT_VECTOR, got {a.domain}/{a.data_type}. Please remove or rename the existing attribute.")
                 self.bm.faces.layers.float_vector.new(attr)
 
+        for attr in CORNER_FLOAT_VECTOR_ATTRS:
+            if attr not in self.bm.loops.layers.float_vector:
+                if attr in self.me.attributes:
+                    a = self.me.attributes[attr]
+                    raise RuntimeError(f"Mesh '{self.me.name}' has an existing '{attr}' attribute that is the wrong domain or type. Expected CORNER/FLOAT_VECTOR, got {a.domain}/{a.data_type}. Please remove or rename the existing attribute.")
+                self.bm.loops.layers.float_vector.new(attr)
+
     @classmethod
     def is_nail_object(cls, obj):
         if obj.type != 'MESH':
@@ -811,6 +825,11 @@ class NailMesh:
         for attr in FACE_FLOAT_VECTOR_ATTRS:
             if (attr not in me.attributes or
                 me.attributes[attr].domain != 'FACE' or
+                me.attributes[attr].data_type != 'FLOAT_VECTOR'):
+                return False
+        for attr in CORNER_FLOAT_VECTOR_ATTRS:
+            if (attr not in me.attributes or
+                me.attributes[attr].domain != 'CORNER' or
                 me.attributes[attr].data_type != 'FLOAT_VECTOR'):
                 return False
         return True
@@ -935,18 +954,17 @@ class NailMesh:
         # implies not checking the align_face flag). But still apply the
         # shift, scale, and rotation.
         axis_lock = (flags & TCFLAG_LOCK_AXIS) == TCFLAG_LOCK_AXIS
-        
-#        if axis_lock:
-#            uaxis = face[self.uaxis_layer]
-#            vaxis = face[self.vaxis_layer]
-#            if vec_is_zero(uaxis) or vec_is_zero(vaxis):
-#                axis_lock = False
 
-#        if axis_lock:
-#            uaxis = face[self.uaxis_layer]
-#            vaxis = face[self.vaxis_layer]
-#        else:
-        if True:
+        baseuv_layer = self.baseuv_layer
+        uv_layer = self.uv_layer
+        if axis_lock:
+            for loop in face.loops:
+                uv_coord = loop[baseuv_layer].xy
+                uv_coord.rotate(rotation_mat)
+                uv_coord *= scale
+                uv_coord += shift
+                loop[uv_layer].uv = uv_coord
+        else:
             # TODO: Investigate what happens if smooth shading is on!
             # I think normals need to be unsmoothed for this to work right
             normal = face.normal
@@ -967,20 +985,17 @@ class NailMesh:
             else:
                 uaxis = RIGHT_VECTORS[orientation]
 
-#            face[self.uaxis_layer] = uaxis
-#            face[self.vaxis_layer] = vaxis
+            for loop in face.loops:
+                vert_coord = loop.vert.co
+                if world_space:
+                    vert_coord = self.matrix_world @ vert_coord
 
-        uv_layer = self.uv_layer
-        for loop in face.loops:
-            vert_coord = loop.vert.co
-            if world_space:
-                vert_coord = self.matrix_world @ vert_coord
-
-            uv_coord = Vector((vert_coord.dot(uaxis), vert_coord.dot(vaxis)))
-            uv_coord.rotate(rotation_mat)
-            uv_coord *= scale
-            uv_coord += shift
-            loop[uv_layer].uv = uv_coord
+                uv_coord = Vector((vert_coord.dot(uaxis), vert_coord.dot(vaxis)))
+                loop[baseuv_layer].xy = uv_coord
+                uv_coord.rotate(rotation_mat)
+                uv_coord *= scale
+                uv_coord += shift
+                loop[uv_layer].uv = uv_coord
 
         if self.wrap_uvs:
             coord0 = face.loops[0][uv_layer].uv
