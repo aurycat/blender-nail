@@ -113,7 +113,10 @@ def clss():
         NailSettings,
     )
 
+draw_handler = None
+
 def register():
+    global draw_handler
     for cls in clss():
         bpy.utils.register_class(cls)
     bpy.types.VIEW3D_PT_view3d_lock.append(draw_lock_rotation)
@@ -123,7 +126,10 @@ def register():
     auto_apply_updated(None, bpy.context)
     WRAP_UVS = bpy.context.window_manager.nail_settings.wrap_uvs
 
+    draw_handler = bpy.types.SpaceView3D.draw_handler_add(debug_draw_3dview, (), 'WINDOW', 'POST_VIEW')
+
 def unregister():
+    global draw_handler
     # Set to None before unregistering NailSceneSettings to avoid Blender crash
     bpy.types.WindowManager.nail_settings = None
 
@@ -134,6 +140,8 @@ def unregister():
     for cls in clss():
         try: bpy.utils.unregister_class(cls)
         except RuntimeError: pass
+
+    bpy.types.SpaceView3D.draw_handler_remove(draw_handler, 'WINDOW')
 
 class NAIL_OT_unregister(Operator):
     bl_idname = "aurycat.nail_unregister"
@@ -949,53 +957,42 @@ class NailMesh:
         rotation_mat = Matrix.Rotation(scale_rot_attr.z, 2)
 
         world_space = (flags & TCFLAG_OBJECT_SPACE) != TCFLAG_OBJECT_SPACE
+        align_face = (flags & TCFLAG_ALIGN_FACE) == TCFLAG_ALIGN_FACE
 
-        # If axis lock is set for this face, reuse existing UV Axis (which
-        # implies not checking the align_face flag). But still apply the
-        # shift, scale, and rotation.
-        axis_lock = (flags & TCFLAG_LOCK_AXIS) == TCFLAG_LOCK_AXIS
+        # TODO: Investigate what happens if smooth shading is on!
+        # I think normals need to be unsmoothed for this to work right
+        normal = face.normal
+        if world_space:
+            normal = self.rot_world @ normal
 
-        baseuv_layer = self.baseuv_layer
-        uv_layer = self.uv_layer
-        if axis_lock:
-            for loop in face.loops:
-                uv_coord = loop[baseuv_layer].xy
-                uv_coord.rotate(rotation_mat)
-                uv_coord *= scale
-                uv_coord += shift
-                loop[uv_layer].uv = uv_coord
+        orientation = face_orientation(normal)
+        vaxis = UP_VECTORS[orientation]
+        if align_face:
+            uaxis = normal.cross(vaxis)
+            uaxis.normalize()
+            vaxis = uaxis.cross(normal)
+            vaxis.normalize()
+            uaxis.negate()
         else:
-            # TODO: Investigate what happens if smooth shading is on!
-            # I think normals need to be unsmoothed for this to work right
-            normal = face.normal
+            uaxis = RIGHT_VECTORS[orientation]
+
+        orig = face.calc_center_median()
+
+        draw_vec(orig, uaxis, (0,1,0))
+        draw_vec(orig, vaxis, (0,0,1))
+
+        uv_layer = self.uv_layer
+        for loop in face.loops:
+            vert_coord = loop.vert.co
             if world_space:
-                normal = self.rot_world @ normal
+                vert_coord = self.matrix_world @ vert_coord
 
-            orientation = face_orientation(normal)
-
-            vaxis = UP_VECTORS[orientation]
-
-            align_face = (flags & TCFLAG_ALIGN_FACE) == TCFLAG_ALIGN_FACE
-            if align_face:
-                uaxis = normal.cross(vaxis)
-                uaxis.normalize()
-                vaxis = uaxis.cross(normal)
-                vaxis.normalize()
-                uaxis.negate()
-            else:
-                uaxis = RIGHT_VECTORS[orientation]
-
-            for loop in face.loops:
-                vert_coord = loop.vert.co
-                if world_space:
-                    vert_coord = self.matrix_world @ vert_coord
-
-                uv_coord = Vector((vert_coord.dot(uaxis), vert_coord.dot(vaxis)))
-                loop[baseuv_layer].xy = uv_coord
-                uv_coord.rotate(rotation_mat)
-                uv_coord *= scale
-                uv_coord += shift
-                loop[uv_layer].uv = uv_coord
+            uv_coord = Vector((vert_coord.dot(uaxis), vert_coord.dot(vaxis)))
+#            loop[baseuv_layer].xy = uv_coord
+            uv_coord.rotate(rotation_mat)
+            uv_coord *= scale
+            uv_coord += shift
+            loop[uv_layer].uv = uv_coord
 
         if self.wrap_uvs:
             coord0 = face.loops[0][uv_layer].uv
@@ -1003,6 +1000,97 @@ class NailMesh:
             diff_coord0 = wrapped_coord0 - coord0
             for loop in face.loops:
                 loop[uv_layer].uv += diff_coord0
+
+#    def compute_face_transform(self, face):
+        
+
+
+#        # If axis lock is set for this face, reuse existing UV Axis (which
+#        # implies not checking the align_face flag). But still apply the
+#        # shift, scale, and rotation.
+#        axis_lock = (flags & TCFLAG_LOCK_AXIS) == TCFLAG_LOCK_AXIS
+#        baseuv_layer = self.baseuv_layer
+#        if axis_lock:
+#            for loop in face.loops:
+#                uv_coord = loop[baseuv_layer].xy
+#                uv_coord.rotate(rotation_mat)
+#                uv_coord *= scale
+#                uv_coord += shift
+#                loop[uv_layer].uv = uv_coord
+#        else:
+
+import bpy
+import gpu
+from gpu_extras.batch import batch_for_shader
+
+coords = []
+coords_color = []
+shader = gpu.shader.from_builtin('FLAT_COLOR')
+
+did_draw = False
+vec_changed = False
+
+# Finds one arbitrary orthogonal vector to v (must be normalized)
+def find_orthogonal(v):
+    r = Vector((0.5407058596611023, 0.642538845539093, 0.5429373383522034)) # random normalized
+    r -= r.dot(v) * v
+    return r.normalized()
+
+def draw_vec(origin, direction, color):
+    global coords, coords_color
+    global did_draw
+    global vec_changed
+    if did_draw:
+        coords = []
+        coords_color = []
+        did_draw = False
+    vec_changed = True
+    o = origin.to_3d()
+    d = direction.to_3d()
+    e = o+d
+
+    dn = d.normalized()
+
+    o1 = find_orthogonal(dn)
+    o2 = dn.cross(o1)
+    o3 = -o1
+    o4 = -o2
+
+    axl = max(d.length-1, d.length*0.5)
+    al = (d.length-axl)*0.1
+    ax = o + dn*axl
+    a1 = ax + o1*al
+    a2 = ax + o2*al
+    a3 = ax + o3*al
+    a4 = ax + o4*al
+
+    et = e.to_tuple()
+    coords.extend([
+        # Main line
+        o.to_tuple(), et,
+        # Arrow head
+        et, a1.to_tuple(),
+        et, a2.to_tuple(),
+        et, a3.to_tuple(),
+        et, a4.to_tuple()])
+
+    c = color
+    coords_color.extend([c,c, c,c, c,c, c,c, c,c])
+
+
+def debug_draw_3dview():
+    global did_draw
+    global coords, coords_color
+    global batch
+    global vec_changed
+    global shader
+    if len(coords) == 0:
+        return
+    if vec_changed:
+        batch = batch_for_shader(shader, 'LINES', {"pos": coords, "color": coords_color})
+        vec_changed = False
+    batch.draw(shader)
+    did_draw = True
 
 
 if __name__ == "__main__":
