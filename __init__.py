@@ -62,14 +62,18 @@ ATTR_SCALE_ROT   = "Nail_ScaleRot"   # per-face Vector(X Scale, Y Scale, Rotatio
 #ATTR_UAXIS       = "Nail_UAxis"      # per-face Vector U axis
 #ATTR_VAXIS       = "Nail_VAxis"      # per-face Vector V axis
 
+ATTR_LOCK_CENTER  = "Nail_LockCenter"
+ATTR_LOCK_NORMAL  = "Nail_LockNormal"
+ATTR_LOCK_TANGENT  = "Nail_LockTangent"
+
 # This is stored as a 3D Vector instead of a 2D Vector, because per-corner
 # 2D Float Vectors are automatically considered UV maps and show up in the
 # UV Maps list. That's not good because the user shouldn't be able to edit
 # this attribute while Nail is active. So use 3D Vector instead.
-ATTR_BASEUV      = "Nail_BaseUV"     # per-corner (aka loop) Vector(U, V, Unused)
+#ATTR_BASEUV      = "Nail_BaseUV"     # per-corner (aka loop) Vector(U, V, Unused)
 
-FACE_FLOAT_VECTOR_ATTRS = [ATTR_SHIFT_FLAGS, ATTR_SCALE_ROT] #, ATTR_UAXIS, ATTR_VAXIS]
-CORNER_FLOAT_VECTOR_ATTRS = [ATTR_BASEUV]
+FACE_FLOAT_VECTOR_ATTRS = [ATTR_SHIFT_FLAGS, ATTR_SCALE_ROT, ATTR_LOCK_CENTER, ATTR_LOCK_NORMAL, ATTR_LOCK_TANGENT] #, ATTR_UAXIS, ATTR_VAXIS]
+CORNER_FLOAT_VECTOR_ATTRS = []#[ATTR_BASEUV]
 
 
 # TextureConfig flags. The bitmask is stored per-face, in the z coordinate of Nail_ShiftFlags
@@ -537,10 +541,10 @@ class NAIL_OT_mark_axislock(Operator):
         return shared_poll(cls, context)
 
     def execute(self, context):
-        tc = TextureConfig()
-        tc.flags_set |= TCFLAG_LOCK_AXIS
-        tc.flags |= TCFLAG_LOCK_AXIS
-        set_or_apply_selected_faces(tc, context, set=True, apply=False)
+        for obj in context.objects_in_mode:
+            if obj.type == 'MESH':
+                with NailMesh(obj) as nm:
+                    nm.lock()
         return {'FINISHED'}
 
 
@@ -555,9 +559,10 @@ class NAIL_OT_clear_axislock(Operator):
         return shared_poll(cls, context)
 
     def execute(self, context):
-        tc = TextureConfig()
-        tc.flags_set |= TCFLAG_LOCK_AXIS
-        set_or_apply_selected_faces(tc, context, set=True, apply=True)
+        for obj in context.objects_in_mode:
+            if obj.type == 'MESH':
+                with NailMesh(obj) as nm:
+                    nm.unlock()
         return {'FINISHED'}
 
 class NAIL_OT_copy_active_to_selected(Operator):
@@ -781,9 +786,12 @@ class NailMesh:
         if not self.readonly:
             self.init_attrs()
         self.uv_layer = self.bm.loops.layers.uv.active
-        self.baseuv_layer = self.bm.loops.layers.float_vector[ATTR_BASEUV]
+#        self.baseuv_layer = self.bm.loops.layers.float_vector[ATTR_BASEUV]
         self.shift_flags_layer = self.bm.faces.layers.float_vector[ATTR_SHIFT_FLAGS]
         self.scale_rot_layer = self.bm.faces.layers.float_vector[ATTR_SCALE_ROT]
+        self.lock_center_layer = self.bm.faces.layers.float_vector[ATTR_LOCK_CENTER]
+        self.lock_normal_layer = self.bm.faces.layers.float_vector[ATTR_LOCK_NORMAL]
+        self.lock_tangent_layer = self.bm.faces.layers.float_vector[ATTR_LOCK_TANGENT]
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -881,12 +889,12 @@ class NailMesh:
     # tc is an in-out parameter
     # Returns True if the face has Nail enabled, False otherwise (tc not modified)
     def get_texture_config_one_face(self, face, tc):
+        if not self.is_nailface(face):
+            return False
+
         shift_flags_attr = face[self.shift_flags_layer]
         scale_rot_attr = face[self.scale_rot_layer]
-
         flags = int(shift_flags_attr.z)
-        if (flags & TCFLAG_ENABLED) != TCFLAG_ENABLED:
-            return False
 
         if tc.multiple_faces:
             # Find all the bits that are different between tc.flags and flags
@@ -944,20 +952,20 @@ class NailMesh:
             self.apply_texture_one_face(face)
 
     def apply_texture_one_face(self, face):
+        if not self.is_nailface(face):
+            return
+
         shift_flags_attr = face[self.shift_flags_layer]
         scale_rot_attr = face[self.scale_rot_layer]
 
-        flags = int(shift_flags_attr.z)
-        if (flags & TCFLAG_ENABLED) != TCFLAG_ENABLED:
-            # Nail is disabled on this face
-            return
-
         shift = shift_flags_attr.xy
         scale = validate_scale(scale_rot_attr.xy)
-        rotation_mat = Matrix.Rotation(scale_rot_attr.z, 2)
+        rotation = scale_rot_attr.z
 
+        flags = int(shift_flags_attr.z)
         world_space = (flags & TCFLAG_OBJECT_SPACE) != TCFLAG_OBJECT_SPACE
         align_face = (flags & TCFLAG_ALIGN_FACE) == TCFLAG_ALIGN_FACE
+        lock_axis = (flags & TCFLAG_LOCK_AXIS) == TCFLAG_LOCK_AXIS
 
         # TODO: Investigate what happens if smooth shading is on!
         # I think normals need to be unsmoothed for this to work right
@@ -965,36 +973,31 @@ class NailMesh:
         if world_space:
             normal = self.rot_world @ normal
 
-        orientation = face_orientation(normal)
-        vaxis = UP_VECTORS[orientation]
-        if align_face:
-            uaxis = normal.cross(vaxis)
-            uaxis.normalize()
-            vaxis = uaxis.cross(normal)
-            vaxis.normalize()
-            uaxis.negate()
-        else:
-            uaxis = RIGHT_VECTORS[orientation]
+        uaxis, vaxis = self.calc_uvaxes(normal, align_face)
 
-#        orig = face.calc_center_median()
+        if lock_axis:
+            lock_center_attr = face[self.lock_center_layer]
+            lock_normal_attr = face[self.lock_normal_layer]
+            lock_tangent_attr = face[self.lock_tangent_layer]
 
-#        edge0_verts = face.edges[0].verts
-#        edge0_center = (edge0_verts[0].co + edge0_verts[1].co)/2
-#        tangent = edge0_center - orig
-#        tangent = face.calc_tangent_edge()
-#        if world_space:
-#            tangent = self.rot_world @ tangent
+            center = face.calc_center_median()
+            # Tangent vector is not normalized, its length is an indication of scale
+            tangent = self.compute_face_tangent(face, center)
+            if world_space:
+                tangent = self.rot_world @ tangent
 
-#        bitangent = normal.cross(tangent)
+            shift, scale, rotation = self.calc_relative_texture_change(
+                shift, scale, rotation,
+                lock_center_attr, lock_normal_attr, lock_tangent_attr,
+                center, normal, tangent,
+                uaxis, vaxis)
 
-#        draw_vec(orig, normal, (1,0,0))
-#        draw_vec(orig, tangent, (0,1,0))
-#        draw_vec(orig, bitangent, (0,0,1))
+#            shift += rshift
+#            scale *= rscale
+#            rotation += rrot
+            
 
-#        sc = math.sqrt(face.calc_area())/2
-#        draw_vec(orig, uaxis*sc, (0,1,0))
-#        draw_vec(orig, vaxis*sc, (0,0,1))
- 
+        rotation_mat = Matrix.Rotation(rotation, 2)
         uv_layer = self.uv_layer
         for loop in face.loops:
             vert_coord = loop.vert.co
@@ -1014,8 +1017,180 @@ class NailMesh:
             for loop in face.loops:
                 loop[uv_layer].uv += diff_coord0
 
-#    def compute_face_transform(self, face):
+    # Tangent vector is not normalized, its length is an indication of scale
+    def compute_face_tangent(self, face, center):
+        edge0_verts = face.edges[0].verts
+        edge0_center = (edge0_verts[0].co + edge0_verts[1].co)/2
+        tangent = edge0_center - center
+        return tangent
+
+    def is_nailface(self, face):
+        shift_flags_attr = face[self.shift_flags_layer]
+        flags = int(shift_flags_attr.z)
+        return (flags & TCFLAG_ENABLED) == TCFLAG_ENABLED
+
+    def lock(self, only_selected=True):
+        only_selected = self.me.is_editmode and only_selected
+        for face in self.bm.faces:
+            if only_selected and not face.select:
+                continue
+            self.lock_face(face)
+
+    def unlock(self, only_selected=True):
+        only_selected = self.me.is_editmode and only_selected
+        for face in self.bm.faces:
+            if only_selected and not face.select:
+                continue
+            self.unlock_face(face)
+
+    def lock_face(self, face):
+        if not self.is_nailface(face):
+            return
+
+        shift_flags_attr = face[self.shift_flags_layer]
+        flags = int(shift_flags_attr.z)
+        flags |= TCFLAG_LOCK_AXIS
+        shift_flags_attr.z = float(flags)
+
+        world_space = (flags & TCFLAG_OBJECT_SPACE) != TCFLAG_OBJECT_SPACE
+
+        center, normal, tangent = self.calc_face_transform(face, world_space)
+
+        face[self.lock_center_layer] = center
+        face[self.lock_normal_layer] = normal
+        face[self.lock_tangent_layer] = tangent
+
+    def unlock_face(self, face):
+        if not self.is_nailface(face):
+            return
+
+        shift_flags_attr = face[self.shift_flags_layer]
+        flags = int(shift_flags_attr.z)
+        flags &= ~TCFLAG_LOCK_AXIS
+        shift_flags_attr.z = float(flags)
+
+        world_space = (flags & TCFLAG_OBJECT_SPACE) != TCFLAG_OBJECT_SPACE
+        align_face = (flags & TCFLAG_ALIGN_FACE) == TCFLAG_ALIGN_FACE
+
+        center, normal, tangent = self.calc_face_transform(face, world_space)
+
+        uaxis, vaxis = self.calc_uvaxes(normal, align_face)
+
+        lock_center_attr = face[self.lock_center_layer]
+        lock_normal_attr = face[self.lock_normal_layer]
+        lock_tangent_attr = face[self.lock_tangent_layer]
+
+        scale_rot_attr = face[self.scale_rot_layer]
+
+        shift = shift_flags_attr.xy
+        scale = validate_scale(scale_rot_attr.xy)
+        rotation = scale_rot_attr.z
+
+        shift, scale, rotation = self.calc_relative_texture_change(
+            shift, scale, rotation,
+            lock_center_attr, lock_normal_attr, lock_tangent_attr,
+            center, normal, tangent,
+            uaxis, vaxis)
+
+        shift_flags_attr.xy = shift
+        scale_rot_attr.xy = scale
+        scale_rot_attr.z = rotation
+
+
+#        shift = shift_flags_attr.xy + rshift
+#        shift = Vector((frac(shift.x), frac(shift.y)))
+
+#        shift_flags_attr.xy = shift
+#        scale_rot_attr.xy = validate_scale(scale_rot_attr.xy) * rscale
+#        scale_rot_attr.z += rrot
+
+#        world_space = (flags & TCFLAG_OBJECT_SPACE) != TCFLAG_OBJECT_SPACE
+
+
+
+
+    def calc_face_transform(self, face, world_space):
+        center = face.calc_center_median()
+        normal = face.normal
+        # Tangent vector is not normalized, its length is an indication of scale
+        tangent = self.compute_face_tangent(face, center)
+        if world_space:
+            center = self.matrix_world @ center
+            normal = self.rot_world @ normal
+            tangent = self.rot_world @ tangent
+        return (center, normal, tangent)
+
+    def calc_uvaxes(self, normal, align_face):
+        orientation = face_orientation(normal)
+        vaxis = UP_VECTORS[orientation]
+        if align_face:
+            uaxis = normal.cross(vaxis)
+            uaxis.normalize()
+            vaxis = uaxis.cross(normal)
+            vaxis.normalize()
+            uaxis.negate()
+        else:
+            uaxis = RIGHT_VECTORS[orientation]
+        return (uaxis, vaxis)
+
+
+    # Returns a relative (shift, scale, rotation) tuple for the face's texture
+    # config based on a change in face transform
+    def calc_relative_texture_change(self,
+                                     pshift, pscale, protation,   # prev config
+                                     pcenter, pnormal, ptangent,  # prev
+                                     ncenter, nnormal, ntangent,  # new
+                                     uaxis, vaxis):               # current u & v axes
+        nshift = pshift
+        nscale = pscale
+        nrotation = protation
+
+        scalefactor = ptangent.length / ntangent.length
+
+        shift3d = ncenter - pcenter
+        shift2d = -Vector((shift3d.dot(uaxis), shift3d.dot(vaxis)))
+#        print(shift2d, pscale, scalefactor)
+
+        nscale = pscale * scalefactor
+#        print(nscale)
+
+
+        prev_origin_shift = -Vector((pcenter.dot(uaxis), pcenter.dot(vaxis)))
+        new_origin_shift = -Vector((ncenter.dot(uaxis), ncenter.dot(vaxis)))
+        prev_origin_shift *= pscale
+        new_origin_shift *= nscale
+        origin_shift_diff = new_origin_shift - prev_origin_shift
+
+        nshift = pshift + origin_shift_diff
+
+
+#        nscale = pscale * scalefactor
+
+#        pr
+
+#        shift2d = -prev_origin_shift + 
+
+
+#        shift2d *= scalefactor
+#        if not math.isclose(scalefactor, 1):
+#            shift2d += shift2d * scalefactor
+#            origin_shift = -Vector((ncenter.dot(uaxis), ncenter.dot(vaxis)))
+#            print(origin_shift)
+#            origin_shift *= scalefactor
+
+        return (nshift, nscale, protation)
         
+
+
+#        if not lock_axis:
+#            lock_center_attr.xyz = orig
+#            lock_normal_attr.xyz = normal
+#            lock_tangent_attr.xyz = tangent
+#        else:
+#            lock_shift = lock_center_attr - orig
+#            lock_shift2d = Vector((lock_shift.dot(uaxis), lock_shift.dot(vaxis)))
+#            shift += lock_shift2d
+
 
 
 #        # If axis lock is set for this face, reuse existing UV Axis (which
