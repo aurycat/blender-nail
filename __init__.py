@@ -44,6 +44,7 @@ import enum
 from bpy.types import Operator
 from bpy.app.handlers import persistent
 from mathutils import Vector, Matrix
+from operator import attrgetter
 
 
 #################
@@ -59,21 +60,26 @@ from mathutils import Vector, Matrix
 # Rotation is stored in radians
 ATTR_SHIFT_FLAGS = "Nail_ShiftFlags" # per-face Vector(X Shift, Y Shift, Flags)
 ATTR_SCALE_ROT   = "Nail_ScaleRot"   # per-face Vector(X Scale, Y Scale, Rotation)
-#ATTR_UAXIS       = "Nail_UAxis"      # per-face Vector U axis
-#ATTR_VAXIS       = "Nail_VAxis"      # per-face Vector V axis
 
-ATTR_LOCK_CENTER  = "Nail_LockCenter"
-ATTR_LOCK_NORMAL  = "Nail_LockNormal"
+ATTR_LOCK_CENTER   = "Nail_LockCenter"
+ATTR_LOCK_NORMAL   = "Nail_LockNormal"
 ATTR_LOCK_TANGENT  = "Nail_LockTangent"
+ATTR_LOCK_BITANGENT  = "Nail_LockBitangent"
+ATTR_LOCK_DATA     = "Nail_LockData"
+ATTR_LOCK_UAXIS    = "Nail_LockUAxis"
+ATTR_LOCK_VAXIS    = "Nail_LockVAxis"
 
-# This is stored as a 3D Vector instead of a 2D Vector, because per-corner
-# 2D Float Vectors are automatically considered UV maps and show up in the
-# UV Maps list. That's not good because the user shouldn't be able to edit
-# this attribute while Nail is active. So use 3D Vector instead.
-#ATTR_BASEUV      = "Nail_BaseUV"     # per-corner (aka loop) Vector(U, V, Unused)
-
-FACE_FLOAT_VECTOR_ATTRS = [ATTR_SHIFT_FLAGS, ATTR_SCALE_ROT, ATTR_LOCK_CENTER, ATTR_LOCK_NORMAL, ATTR_LOCK_TANGENT] #, ATTR_UAXIS, ATTR_VAXIS]
-CORNER_FLOAT_VECTOR_ATTRS = []#[ATTR_BASEUV]
+ATTRS = {
+    ATTR_SHIFT_FLAGS:  ('FACE', 'FLOAT_VECTOR', attrgetter("faces.layers.float_vector"), 'shift_flags_layer'),
+    ATTR_SCALE_ROT:    ('FACE', 'FLOAT_VECTOR', attrgetter("faces.layers.float_vector"), 'scale_rot_layer'),
+    ATTR_LOCK_CENTER:  ('FACE', 'FLOAT_VECTOR', attrgetter("faces.layers.float_vector"), 'lock_center_layer'),
+    ATTR_LOCK_NORMAL:  ('FACE', 'FLOAT_VECTOR', attrgetter("faces.layers.float_vector"), 'lock_normal_layer'),
+    ATTR_LOCK_TANGENT: ('FACE', 'FLOAT_VECTOR', attrgetter("faces.layers.float_vector"), 'lock_tangent_layer'),
+    ATTR_LOCK_BITANGENT: ('FACE', 'FLOAT_VECTOR', attrgetter("faces.layers.float_vector"), 'lock_bitangent_layer'),
+    ATTR_LOCK_DATA:    ('FACE', 'FLOAT_VECTOR', attrgetter("faces.layers.float_vector"), 'lock_data_layer'),
+    ATTR_LOCK_UAXIS:   ('FACE', 'FLOAT_VECTOR', attrgetter("faces.layers.float_vector"), 'lock_uaxis_layer'),
+    ATTR_LOCK_VAXIS:   ('FACE', 'FLOAT_VECTOR', attrgetter("faces.layers.float_vector"), 'lock_vaxis_layer'),
+}
 
 
 # TextureConfig flags. The bitmask is stored per-face, in the z coordinate of Nail_ShiftFlags
@@ -795,12 +801,9 @@ class NailMesh:
         if not self.readonly:
             self.init_attrs()
         self.uv_layer = self.bm.loops.layers.uv.active
-#        self.baseuv_layer = self.bm.loops.layers.float_vector[ATTR_BASEUV]
-        self.shift_flags_layer = self.bm.faces.layers.float_vector[ATTR_SHIFT_FLAGS]
-        self.scale_rot_layer = self.bm.faces.layers.float_vector[ATTR_SCALE_ROT]
-        self.lock_center_layer = self.bm.faces.layers.float_vector[ATTR_LOCK_CENTER]
-        self.lock_normal_layer = self.bm.faces.layers.float_vector[ATTR_LOCK_NORMAL]
-        self.lock_tangent_layer = self.bm.faces.layers.float_vector[ATTR_LOCK_TANGENT]
+        for attr_name, attr_info in ATTRS.items():
+            layer = attr_info[2](self.bm)
+            setattr(self, attr_info[3], layer[attr_name])
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -821,21 +824,15 @@ class NailMesh:
             # Not sure if this is possible, but just to be safe
             raise RuntimeError(f"Mesh '{self.me.name}' has at least one UV Map, but none are marked 'active'. Please make sure a UVMap is selected on this mesh.")
 
-        for attr in FACE_FLOAT_VECTOR_ATTRS:
-            if attr not in self.bm.faces.layers.float_vector:
-                if attr in self.me.attributes:
+        for attr_name, attr_info in ATTRS.items():
+            layer = attr_info[2](self.bm)
+            if attr_name not in layer:
+                if attr_name in self.me.attributes:
                     # Not in faces.layers.float_vector, but it is in me.attributes, which
                     # implies the attribute already exists with some other domain/type
                     a = self.me.attributes[attr]
-                    raise RuntimeError(f"Mesh '{self.me.name}' has an existing '{attr}' attribute that is the wrong domain or type. Expected FACE/FLOAT_VECTOR, got {a.domain}/{a.data_type}. Please remove or rename the existing attribute.")
-                self.bm.faces.layers.float_vector.new(attr)
-
-        for attr in CORNER_FLOAT_VECTOR_ATTRS:
-            if attr not in self.bm.loops.layers.float_vector:
-                if attr in self.me.attributes:
-                    a = self.me.attributes[attr]
-                    raise RuntimeError(f"Mesh '{self.me.name}' has an existing '{attr}' attribute that is the wrong domain or type. Expected CORNER/FLOAT_VECTOR, got {a.domain}/{a.data_type}. Please remove or rename the existing attribute.")
-                self.bm.loops.layers.float_vector.new(attr)
+                    raise RuntimeError(f"Mesh '{self.me.name}' has an existing '{attr_name}' attribute that is the wrong domain or type. Expected {attr_info[0]}/{attr_info[1]}, got {a.domain}/{a.data_type}. Please remove or rename the existing attribute.")
+                layer.new(attr_name)
 
     @classmethod
     def is_nail_object(cls, obj):
@@ -847,15 +844,10 @@ class NailMesh:
     def is_nail_mesh(cls, me):
         if len(me.uv_layers) == 0:
             return False
-        for attr in FACE_FLOAT_VECTOR_ATTRS:
-            if (attr not in me.attributes or
-                me.attributes[attr].domain != 'FACE' or
-                me.attributes[attr].data_type != 'FLOAT_VECTOR'):
-                return False
-        for attr in CORNER_FLOAT_VECTOR_ATTRS:
-            if (attr not in me.attributes or
-                me.attributes[attr].domain != 'CORNER' or
-                me.attributes[attr].data_type != 'FLOAT_VECTOR'):
+        for attr_name, attr_info in ATTRS.items():
+            if ( attr_name not in me.attributes or
+                 me.attributes[attr_name].domain != attr_info[0] or
+                 me.attributes[attr_name].data_type != attr_info[1] ):
                 return False
         return True
 
@@ -973,16 +965,16 @@ class NailMesh:
 
         uaxis, vaxis = self.calc_uvaxes(normal, f.align_face)
 
-        if f.lock_axis:
-            t_center, t_normal, t_tangent = self.calc_face_transform(face, f.world_space, uaxis, vaxis)
+#        if f.lock_axis:
+##            t_center, t_normal, t_tangent = self.calc_face_transform(face, f.world_space, uaxis, vaxis)
 
-            shift, scale, rotation = self.calc_relative_texture_change(
-                f.shift, f.scale, f.rotation,
-                f.lock_center_attr, f.lock_normal_attr, f.lock_tangent_attr,
-                t_center, t_normal, t_tangent,
-                uaxis, vaxis)
-        else: 
-            shift, scale, rotation = f.shift, f.scale, f.rotation
+#            shift, scale, rotation = self.calc_relative_texture_change(
+#                f.shift, f.scale, f.rotation,
+#                f.lock_center_attr, f.lock_normal_attr, f.lock_tangent_attr,
+#                t_center, t_normal, t_tangent,
+#                uaxis, vaxis)
+#        else: 
+        shift, scale, rotation = f.shift, f.scale, f.rotation
 
         rotation_mat = Matrix.Rotation(rotation, 2)
         uv_layer = self.uv_layer
@@ -1028,91 +1020,135 @@ class NailMesh:
         if f is None or f.lock_axis:
             return
 
+        # Dont need to use uaxis,vaxis stuff for finding tangent.
+        # All that's needed is to get a transformation matrix that
+        # goes from before to after. That is then used to transform
+        # the uaxis,vaxis stuff when unlocking
+
+        center = face.calc_center_median()
         normal = face.normal
         if f.world_space:
+            center = self.matrix_world @ center
             normal = self.rot_world @ normal
 
         uaxis, vaxis = self.calc_uvaxes(normal, f.align_face)
 
-        t_center, t_normal, t_tangent = self.calc_face_transform(face, f.world_space, uaxis, vaxis)
+        # Find two vectors from center to edge that best represent
+        # the X and Y texture scale axes (i.e. UV axes). This is like
+        # uaxis & vaxis except they're tied to the edge indices, which
+        # should remain constant throughout common transformations like
+        # translate, rotation, and scale.
+        best_x_scale_axis = None
+        best_y_scale_axis = None
+        best_x_scale_axis_dot = -100
+        best_y_scale_axis_dot = -100
+        best_x_scale_axis_edge_index = 0
+        best_y_scale_axis_edge_index = 0
+        i = 0
+        for edge in face.edges:
+            e_verts = edge.verts
+            e_center = (e_verts[0].co + e_verts[1].co)/2
+            if f.world_space:
+                e_center = self.matrix_world @ e_center
+            e_vec = e_center - center
+            e_vec_normalized = e_vec.normalized()
+            xdot = e_vec_normalized.dot(uaxis)
+            ydot = e_vec_normalized.dot(vaxis)
+            if xdot > best_x_scale_axis_dot:
+                best_x_scale_axis = e_vec
+                best_x_scale_axis_dot = xdot
+                best_x_scale_axis_edge_index = i
+                print("found better x", xdot, i)
+            if ydot > best_y_scale_axis_dot:
+                best_y_scale_axis = e_vec
+                best_y_scale_axis_dot = ydot
+                best_y_scale_axis_edge_index = i
+                print("found better y", ydot, i)
+            i += 1
+
+        draw_vec(center, best_x_scale_axis, (0,1,0))
+        draw_vec(center, best_y_scale_axis, (0,0,1))
+        # None's shouldn't be possible, but the equal best-x-and-y can
+        # happen if all the face's edges are stacked on each other.
+        # Whatever, just pick something.
+        if best_x_scale_axis == best_y_scale_axis or best_x_scale_axis is None or best_y_scale_axis is None:
+            raise RuntimeError(f"Failed to lock face {face.index}, could not compute lock axes")
 
         f.shift_flags_attr.z = flag_set(f.flags, TCFLAG_LOCK_AXIS)
-        f.lock_center_attr.xyz = t_center
-        f.lock_normal_attr.xyz = t_normal
-        f.lock_tangent_attr.xyz = t_tangent
+        f.lock_center_attr.xyz = center
+        f.lock_normal_attr.xyz = normal
+        f.lock_tangent_attr.xyz = best_x_scale_axis
+        f.lock_bitangent_attr.xyz = best_y_scale_axis
+        f.lock_data_attr.x = best_x_scale_axis_edge_index
+        f.lock_data_attr.y = best_y_scale_axis_edge_index
+        f.lock_uaxis_attr.xyz = uaxis
+        f.lock_vaxis_attr.xyz = vaxis
+        draw_vec(center, normal, (1,0,0))
+        draw_vec(center, uaxis, (1,1,0))
+        draw_vec(center, vaxis, (0,1,1))
 
     def unlock_face(self, face):
         f = self.unpack_face_data(face)
         if f is None or not f.lock_axis:
             return
 
-        normal = face.normal
-        if f.world_space:
-            normal = self.rot_world @ normal
+#        t_center, t_normal, t_tangent = self.calc_face_transform(face, f)
 
-        uaxis, vaxis = self.calc_uvaxes(normal, f.align_face)
-
-        t_center, t_normal, t_tangent = self.calc_face_transform(face, f.world_space, uaxis, vaxis)
-
-        shift, scale, rotation = self.calc_relative_texture_change(
-            f.shift, f.scale, f.rotation,
-            f.lock_center_attr, f.lock_normal_attr, f.lock_tangent_attr,
-            t_center, t_normal, t_tangent,
-            uaxis, vaxis)
+#        shift, scale, rotation = self.calc_relative_texture_change(
+#            f.shift, f.scale, f.rotation,
+#            f.lock_center_attr, f.lock_normal_attr, f.lock_tangent_attr,
+#            t_center, t_normal, t_tangent,
+#            uaxis, vaxis)
 
         f.shift_flags_attr.z = flag_clear(f.flags, TCFLAG_LOCK_AXIS)
-        f.shift_flags_attr.xy = shift
-        f.scale_rot_attr.xy = scale
-        f.scale_rot_attr.z = rotation
+#        f.shift_flags_attr.xy = shift
+#        f.scale_rot_attr.xy = scale
+#        f.scale_rot_attr.z = rotation
 
-    def calc_face_transform(self, face, world_space, uaxis, vaxis):
-        center = face.calc_center_median()
-        normal = face.normal
-        if world_space:
-            center = self.matrix_world @ center
-            normal = self.rot_world @ normal
+#    def calc_face_transform(self, face, f):
+#        
+#        center = face.calc_center_median()
+#        normal = face.normal
+#        if f.world_space:
+#            center = self.matrix_world @ center
+#            normal = self.rot_world @ normal
 
-        best_x_scale_axis = None
-        best_y_scale_axis = None
-        best_x_scale_axis_dot = -100
-        best_y_scale_axis_dot = -100
+#        uaxis, vaxis = self.calc_uvaxes(normal, f.align_face)
 
-        # TODO: This doesnt work because it's not consistent between
-        # lock and unlock when the edges change which u/vaxis they're
-        # most closely aligned to. Perhaps an edge needs to be picked
-        # at lock, and then that same edge gets reused during compute
-        # and unlock.
-        for edge in face.edges:
-            e_verts = edge.verts
-            e_center = (e_verts[0].co + e_verts[1].co)/2
-            if world_space:
-                e_center = self.matrix_world @ e_center
-            e_vec = e_center - center
-            e_vec_normalized = e_vec.normalized()
-#            draw_vec(center, e_vec, (0,0,1))
-            xdot = e_vec_normalized.dot(uaxis)
-            ydot = e_vec_normalized.dot(vaxis)
-            if xdot > best_x_scale_axis_dot:
-                best_x_scale_axis = e_vec
-                best_x_scale_axis_dot = xdot
-            if ydot > best_y_scale_axis_dot:
-                best_y_scale_axis = e_vec
-                best_y_scale_axis_dot = ydot
+##        if tangent_edges is not None:
+##            face.
 
-        # None's shouldn't be possible, but the equal best-x-and-y can
-        # happen if all the face's edges are stacked on each other.
-        # Whatever, just pick something.
-        if best_x_scale_axis == best_y_scale_axis or best_x_scale_axis is None or best_y_scale_axis is None:
-            best_x_scale_axis = uaxis
-            best_y_scale_axis = vaxis
-            
-        # Encode the X scale in the normal vector's length
-        # (Just to avoid needing even more attributes!)
-        normal *= best_x_scale_axis.length
+#        # TODO: This doesnt work because it's not consistent between
+#        # lock and unlock when the edges change which u/vaxis they're
+#        # most closely aligned to. Perhaps an edge needs to be picked
+#        # at lock, and then that same edge gets reused during compute
+#        # and unlock.
+#        for edge in face.edges:
+#            e_verts = edge.verts
+#            e_center = (e_verts[0].co + e_verts[1].co)/2
+#            if world_space:
+#                e_center = self.matrix_world @ e_center
+#            e_vec = e_center - center
+#            e_vec_normalized = e_vec.normalized()
+##            draw_vec(center, e_vec, (0,0,1))
+#            xdot = e_vec_normalized.dot(uaxis)
+#            ydot = e_vec_normalized.dot(vaxis)
+#            if xdot > best_x_scale_axis_dot:
+#                best_x_scale_axis = e_vec
+#                best_x_scale_axis_dot = xdot
+#            if ydot > best_y_scale_axis_dot:
+#                best_y_scale_axis = e_vec
+#                best_y_scale_axis_dot = ydot
 
-        tangent = best_y_scale_axis
+#        # None's shouldn't be possible, but the equal best-x-and-y can
+#        # happen if all the face's edges are stacked on each other.
+#        # Whatever, just pick something.
+#        if best_x_scale_axis == best_y_scale_axis or best_x_scale_axis is None or best_y_scale_axis is None:
+#            best_x_scale_axis = uaxis
+#            best_y_scale_axis = vaxis
+#            
 
-        return (center, normal, tangent)
+#        return (center, normal, tangent)
 
     def calc_uvaxes(self, normal, align_face):
         orientation = face_orientation(normal)
@@ -1173,6 +1209,10 @@ class NailMesh:
         nf.lock_center_attr = face[self.lock_center_layer]
         nf.lock_normal_attr = face[self.lock_normal_layer]
         nf.lock_tangent_attr = face[self.lock_tangent_layer]
+        nf.lock_bitangent_attr = face[self.lock_bitangent_layer]
+        nf.lock_data_attr = face[self.lock_data_layer]
+        nf.lock_uaxis_attr = face[self.lock_uaxis_layer]
+        nf.lock_vaxis_attr = face[self.lock_vaxis_layer]
 
         nf.shift = shift_flags_attr.xy
         nf.scale = validate_scale(nf.scale_rot_attr.xy)
