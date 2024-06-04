@@ -58,30 +58,39 @@ from operator import attrgetter
 # Flags are a bitmask of the TCFLAG_* constants below (yes it's a bitmask stored
 # in the z axis of a float vector, I'm sorry okay!)
 # Rotation is stored in radians
-ATTR_SHIFT_FLAGS = "Nail_ShiftFlags" # per-face Vector(X Shift, Y Shift, Flags)
-ATTR_SCALE_ROT   = "Nail_ScaleRot"   # per-face Vector(X Scale, Y Scale, Rotation)
+#ATTR_SHIFT_FLAGS =  # per-face Vector(X Shift, Y Shift, Flags)
+#ATTR_SCALE_ROT   =    # per-face Vector(X Scale, Y Scale, Rotation)
 
-ATTR_LOCK_CENTER   = "Nail_LockCenter"
-ATTR_LOCK_NORMAL   = "Nail_LockNormal"
-ATTR_LOCK_TANGENT  = "Nail_LockTangent"
-ATTR_LOCK_BITANGENT  = "Nail_LockBitangent"
-ATTR_LOCK_DATA     = "Nail_LockData"
-ATTR_LOCK_UAXIS    = "Nail_LockUAxis"
-ATTR_LOCK_VAXIS    = "Nail_LockVAxis"
-ATTR_AXIS_ROT      = "Nail_AxisRot"
+#ATTR_LOCK_CENTER   = 
+#ATTR_LOCK_NORMAL   = 
+#ATTR_LOCK_TANGENT  = 
+#ATTR_LOCK_BITANGENT  = 
+#ATTR_LOCK_DATA     = 
+#ATTR_LOCK_UAXIS    = 
+#ATTR_LOCK_VAXIS    = 
+#ATTR_AXIS_ROT      = 
+
+face_vec3_getter = attrgetter("faces.layers.float_vector")
+# float_color is the only vec4 attribute accessible by BMesh >:(
+face_vec4_getter = attrgetter("faces.layers.float_color")
+
+VEC3_ATTR_DEFAULT = Vector((0,0,0)).freeze()
+VEC4_ATTR_DEFAULT = Vector((1,1,1,1)).freeze()
 
 ATTRS = {
-    ATTR_SHIFT_FLAGS:  ('FACE', 'FLOAT_VECTOR', attrgetter("faces.layers.float_vector"), 'shift_flags_layer'),
-    ATTR_SCALE_ROT:    ('FACE', 'FLOAT_VECTOR', attrgetter("faces.layers.float_vector"), 'scale_rot_layer'),
-    ATTR_LOCK_CENTER:  ('FACE', 'FLOAT_VECTOR', attrgetter("faces.layers.float_vector"), 'lock_center_layer'),
-    ATTR_LOCK_NORMAL:  ('FACE', 'FLOAT_VECTOR', attrgetter("faces.layers.float_vector"), 'lock_normal_layer'),
-    ATTR_LOCK_TANGENT: ('FACE', 'FLOAT_VECTOR', attrgetter("faces.layers.float_vector"), 'lock_tangent_layer'),
-    ATTR_LOCK_BITANGENT: ('FACE', 'FLOAT_VECTOR', attrgetter("faces.layers.float_vector"), 'lock_bitangent_layer'),
-    ATTR_LOCK_DATA:    ('FACE', 'FLOAT_VECTOR', attrgetter("faces.layers.float_vector"), 'lock_data_layer'),
-    ATTR_LOCK_UAXIS:   ('FACE', 'FLOAT_VECTOR', attrgetter("faces.layers.float_vector"), 'lock_uaxis_layer'),
-    ATTR_LOCK_VAXIS:   ('FACE', 'FLOAT_VECTOR', attrgetter("faces.layers.float_vector"), 'lock_vaxis_layer'),
-    # bmesh API doesn't have access to quaternion attributes >:(
-    ATTR_AXIS_ROT:   ('FACE', 'FLOAT_COLOR', attrgetter("faces.layers.float_color"), 'axis_rot_layer'),
+    "Nail_ShiftFlags":     ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'shift_flags_layer'),
+    "Nail_ScaleRot":       ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'scale_rot_layer'),
+    "Nail_LockCenter":     ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_center_layer'),
+    "Nail_LockNormal":     ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_normal_layer'),
+    "Nail_LockTangent":    ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_tangent_layer'),
+    "Nail_LockBitangent":  ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_bitangent_layer'),
+    "Nail_LockData":       ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_data_layer'),
+    "Nail_LockUAxis":      ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_uaxis_layer'),
+    "Nail_LockVAxis":      ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_vaxis_layer'),
+    "Nail_AxisRot":        ('FACE', 'FLOAT_COLOR', face_vec4_getter, 'axis_rot_layer'),
+    "Nail_Transform_Row1": ('FACE', 'FLOAT_COLOR', face_vec4_getter, 'transform_r1_layer'),
+    "Nail_Transform_Row2": ('FACE', 'FLOAT_COLOR', face_vec4_getter, 'transform_r2_layer'),
+    "Nail_Transform_Row3": ('FACE', 'FLOAT_COLOR', face_vec4_getter, 'transform_r3_layer'),
 }
 
 
@@ -1018,6 +1027,7 @@ class NailMesh:
         # TODO: Investigate what happens if smooth shading is on!
         # I think normals need to be unsmoothed for this to work right
         normal = face.normal
+        normal = f.transform_attr.to_quaternion() @ normal
         if f.world_space:
             normal = self.rot_world @ normal
 
@@ -1034,15 +1044,15 @@ class NailMesh:
 #        else: 
         shift, scale, rotation = f.shift, f.scale, f.rotation
 
-        axis_rot = Quaternion(f.axis_rot_attr)
-        if ((axis_rot.w == 0 and axis_rot.x == 0 and axis_rot.y == 0 and axis_rot.z == 0) or
-            (axis_rot.w == 1 and axis_rot.x == 1 and axis_rot.y == 1 and axis_rot.z == 1)):
-            f.axis_rot_attr.xyzw = Vector((1,0,0,0))
-            axis_rot = Quaternion()
-        print(axis_rot)
+#        axis_rot = Quaternion(f.axis_rot_attr)
+#        if ((axis_rot.w == 0 and axis_rot.x == 0 and axis_rot.y == 0 and axis_rot.z == 0) or
+#            (axis_rot.w == 1 and axis_rot.x == 1 and axis_rot.y == 1 and axis_rot.z == 1)):
+#            f.axis_rot_attr.xyzw = Vector((1,0,0,0))
+#            axis_rot = Quaternion()
+#        print(axis_rot)
 
-        uaxis = axis_rot @ uaxis
-        vaxis = axis_rot @ vaxis
+#        uaxis = axis_rot @ uaxis
+#        vaxis = axis_rot @ vaxis
 
         center = face.calc_center_median()
         draw_vec(center, uaxis, (1,0,0))
@@ -1052,6 +1062,7 @@ class NailMesh:
         uv_layer = self.uv_layer
         for loop in face.loops:
             vert_coord = loop.vert.co
+            vert_coord = f.transform_attr @ vert_coord
             if f.world_space:
                 vert_coord = self.matrix_world @ vert_coord
 
@@ -1077,40 +1088,49 @@ class NailMesh:
         only_selected = self.me.is_editmode and only_selected
         verts = set()
         faces = []
-        mat_copy = mat.copy()
-        rotateAngles = mat.to_quaternion()
-        moveDelta = mat.to_translation()
-        scale = mat.to_scale()
-        mat.translation.xyz = 0
+#        mat_copy = mat.copy()
+#        rotateAngles = mat.to_quaternion()
+#        moveDelta = mat.to_translation()
+#        scale = mat.to_scale()
+#        mat.translation.xyz = 0
         for face in self.bm.faces:
             if only_selected and not face.select:
                 continue
-            self.locked_transform_one_face(face, mat, rotateAngles, moveDelta, scale)
+            self.locked_transform_one_face(face, mat)
             verts.update(face.verts)
             faces.append(face)
         
         space = Matrix.Translation(-faces[0].calc_center_median())
-        bmesh.ops.transform(self.bm, matrix=mat_copy, space=space, verts=list(verts))
+        bmesh.ops.transform(self.bm, matrix=mat, space=space, verts=list(verts))
 
-    def locked_transform_one_face(self, face, mat, rotateAngles, moveDelta, scale):
+    def locked_transform_one_face(self, face, mat):
         f = self.unpack_face_data(face)
         if f is None:
             return
 
-        f.axis_rot_attr.xyzw = rotateAngles[:]
-#        return
+        mat = mat.inverted()
 
-        bIsLocking = True
-        bIsMoving = moveDelta.length_squared > 0.00001
+        f.transform_attr @= mat
 
-        normal = face.normal
-        if f.world_space:
-            normal = self.rot_world @ normal
+        row = f.transform_attr.row
+        face[self.transform_r1_layer] = row[0]
+        face[self.transform_r2_layer] = row[1]
+        face[self.transform_r3_layer] = row[2]
 
-        uaxis, vaxis = self.calc_uvaxes(normal, f.align_face)
+#        f.axis_rot_attr.xyzw = rotateAngles[:]
+##        return
 
-#        if mat.is_identity:
-        self.face_offset_texture(face, f, moveDelta, uaxis, vaxis)
+#        bIsLocking = True
+#        bIsMoving = moveDelta.length_squared > 0.00001
+
+#        normal = face.normal
+#        if f.world_space:
+#            normal = self.rot_world @ normal
+
+#        uaxis, vaxis = self.calc_uvaxes(normal, f.align_face)
+
+##        if mat.is_identity:
+#        self.face_offset_texture(face, f, moveDelta, uaxis, vaxis)
 #            return
 
 #        fscaleU = uaxis.length
@@ -1384,6 +1404,22 @@ class NailMesh:
         nf.lock_uaxis_attr = face[self.lock_uaxis_layer]
         nf.lock_vaxis_attr = face[self.lock_vaxis_layer]
         nf.axis_rot_attr = face[self.axis_rot_layer]
+
+        tr1 = face[self.transform_r1_layer]
+        tr2 = face[self.transform_r2_layer]
+        tr3 = face[self.transform_r3_layer]
+
+        v4def = VEC4_ATTR_DEFAULT
+        if tr1 == v4def and tr2 == v4def and tr3 == v4def:
+            tr1 = Vector((1,0,0,0))
+            tr2 = Vector((0,1,0,0))
+            tr3 = Vector((0,0,1,0))
+            face[self.transform_r1_layer] = tr1
+            face[self.transform_r2_layer] = tr2
+            face[self.transform_r3_layer] = tr3
+
+        nf.transform_attr = Matrix([tr1, tr2, tr3, (0,0,0,1)])
+        print(nf.transform_attr)
 
         nf.shift = shift_flags_attr.xy
         nf.scale = validate_scale(nf.scale_rot_attr.xy)
