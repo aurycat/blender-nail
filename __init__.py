@@ -1026,12 +1026,17 @@ class NailMesh:
 
         # TODO: Investigate what happens if smooth shading is on!
         # I think normals need to be unsmoothed for this to work right
-        normal = face.normal
-        normal = f.transform_attr.to_quaternion() @ normal
-        if f.world_space:
-            normal = self.rot_world @ normal
+#        normal = face.normal
+#        normal = f.transform_attr.to_quaternion() @ normal
+#        if f.world_space:
+#            normal = self.rot_world @ normal
 
-        uaxis, vaxis = self.calc_uvaxes(normal, f.align_face)
+#        uaxis, vaxis = self.calc_uvaxes(normal, f.align_face)
+
+        uaxis, vaxis = self.calc_uvaxes(Vector((0,0,1)), False)
+        tq = f.transform_attr.to_quaternion()
+        uaxis = tq @ uaxis
+        vaxis = tq @ vaxis
 
 #        if f.lock_axis:
 ##            t_center, t_normal, t_tangent = self.calc_face_transform(face, f.world_space, uaxis, vaxis)
@@ -1062,7 +1067,7 @@ class NailMesh:
         uv_layer = self.uv_layer
         for loop in face.loops:
             vert_coord = loop.vert.co
-            vert_coord = f.transform_attr @ vert_coord
+#            vert_coord = f.transform_attr @ vert_coord
             if f.world_space:
                 vert_coord = self.matrix_world @ vert_coord
 
@@ -1087,7 +1092,22 @@ class NailMesh:
     def locked_transform(self, mat, only_selected=True):
         only_selected = self.me.is_editmode and only_selected
         verts = set()
-        faces = []
+
+        first_face = None
+        for face in self.bm.faces:
+            if only_selected and not face.select:
+                continue
+            first_face = face
+            break
+        
+        if first_face is not None:
+
+#        print("---", len(self.bm.faces), self.bm.faces[0])
+            space = Matrix.Translation(-first_face.calc_center_median())
+            mat = space.inverted() @ mat @ space
+            print(mat)
+
+#        faces = []
 #        mat_copy = mat.copy()
 #        rotateAngles = mat.to_quaternion()
 #        moveDelta = mat.to_translation()
@@ -1098,24 +1118,27 @@ class NailMesh:
                 continue
             self.locked_transform_one_face(face, mat)
             verts.update(face.verts)
-            faces.append(face)
+#            faces.append(face)
         
-        space = Matrix.Translation(-faces[0].calc_center_median())
-        bmesh.ops.transform(self.bm, matrix=mat, space=space, verts=list(verts))
+#        space = Matrix()#Matrix.Translation(-faces[0].calc_center_median())
+        bmesh.ops.transform(self.bm, matrix=mat, verts=list(verts))
 
     def locked_transform_one_face(self, face, mat):
         f = self.unpack_face_data(face)
         if f is None:
             return
 
-        mat = mat.inverted()
-
+        mat = mat.copy()
+#        mat.invert()
+        moveDelta = mat.translation.xyz.copy()
+        mat.translation.xyz = 0
         f.transform_attr @= mat
-
         row = f.transform_attr.row
         face[self.transform_r1_layer] = row[0]
         face[self.transform_r2_layer] = row[1]
         face[self.transform_r3_layer] = row[2]
+
+#        self.face_offset_texture(face, f, moveDelta, uaxis, vaxis)
 
 #        f.axis_rot_attr.xyzw = rotateAngles[:]
 ##        return
@@ -1123,14 +1146,21 @@ class NailMesh:
 #        bIsLocking = True
 #        bIsMoving = moveDelta.length_squared > 0.00001
 
-#        normal = face.normal
-#        if f.world_space:
-#            normal = self.rot_world @ normal
+        normal = face.normal
+        normal = f.transform_attr.to_quaternion() @ normal
+        if f.world_space:
+            normal = self.rot_world @ normal
+
+        uaxis, vaxis = self.calc_uvaxes(Vector((0,0,1)), False)
+        tq = f.transform_attr.to_quaternion()
+        uaxis = tq @ uaxis
+        vaxis = tq @ vaxis
 
 #        uaxis, vaxis = self.calc_uvaxes(normal, f.align_face)
 
 ##        if mat.is_identity:
-#        self.face_offset_texture(face, f, moveDelta, uaxis, vaxis)
+        self.face_offset_texture(face, f, moveDelta, uaxis, vaxis)
+        print(f.shift_flags_attr.xy)
 #            return
 
 #        fscaleU = uaxis.length
@@ -1419,7 +1449,6 @@ class NailMesh:
             face[self.transform_r3_layer] = tr3
 
         nf.transform_attr = Matrix([tr1, tr2, tr3, (0,0,0,1)])
-        print(nf.transform_attr)
 
         nf.shift = shift_flags_attr.xy
         nf.scale = validate_scale(nf.scale_rot_attr.xy)
