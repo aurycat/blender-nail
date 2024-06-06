@@ -80,30 +80,34 @@ VEC4_ATTR_DEFAULT = Vector((1,1,1,1)).freeze()
 ATTRS = {
     "Nail_ShiftFlags":     ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'shift_flags_layer'),
     "Nail_ScaleRot":       ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'scale_rot_layer'),
-    "Nail_LockCenter":     ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_center_layer'),
-    "Nail_LockNormal":     ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_normal_layer'),
-    "Nail_LockTangent":    ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_tangent_layer'),
-    "Nail_LockBitangent":  ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_bitangent_layer'),
-    "Nail_LockData":       ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_data_layer'),
+#    "Nail_LockCenter":     ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_center_layer'),
+#    "Nail_LockNormal":     ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_normal_layer'),
+#    "Nail_LockTangent":    ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_tangent_layer'),
+#    "Nail_LockBitangent":  ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_bitangent_layer'),
+#    "Nail_LockData":       ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_data_layer'),
     "Nail_LockUAxis":      ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_uaxis_layer'),
     "Nail_LockVAxis":      ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_vaxis_layer'),
-    "Nail_AxisRot":        ('FACE', 'FLOAT_COLOR', face_vec4_getter, 'axis_rot_layer'),
-    "Nail_Transform_Row1": ('FACE', 'FLOAT_COLOR', face_vec4_getter, 'transform_r1_layer'),
-    "Nail_Transform_Row2": ('FACE', 'FLOAT_COLOR', face_vec4_getter, 'transform_r2_layer'),
-    "Nail_Transform_Row3": ('FACE', 'FLOAT_COLOR', face_vec4_getter, 'transform_r3_layer'),
+#    "Nail_AxisRot":        ('FACE', 'FLOAT_COLOR', face_vec4_getter, 'axis_rot_layer'),
+#    "Nail_Transform_Row1": ('FACE', 'FLOAT_COLOR', face_vec4_getter, 'transform_r1_layer'),
+#    "Nail_Transform_Row2": ('FACE', 'FLOAT_COLOR', face_vec4_getter, 'transform_r2_layer'),
+#    "Nail_Transform_Row3": ('FACE', 'FLOAT_COLOR', face_vec4_getter, 'transform_r3_layer'),
 }
 
 
 # TextureConfig flags. The bitmask is stored per-face, in the z coordinate of Nail_ShiftFlags
 TCFLAG_ENABLED = 1        # True to use Nail on this face, otherwise Nail will ignore it.
                           # The default is False, so Nail is "opt-in".
-TCFLAG_LOCK_AXIS = 2      # True to not recompute the UV axis when (re)applying a face's
-                          # texture. The default is to recompute it every apply.
-TCFLAG_OBJECT_SPACE = 4   # True to compute UV axis in object-space. Default is world-space.
-TCFLAG_ALIGN_FACE = 8     # True to have the UV axis aligned to the face instead. The default
-                          # is to use the coordinate system (world or object-space) axes.
+#TCFLAG_LOCK_AXIS = 2      # True to not recompute the UV axis when (re)applying a face's
+#                          # texture. The default is to recompute it every apply.
+TCFLAG_OBJECT_SPACE = 2   # True to compute UV axis in object-space. Default is world-space.
+#TCFLAG_ALIGN_FACE = 8     # True to have the UV axis aligned to the face instead. The default
+#                          # is to use the coordinate system (world or object-space) axes.
+TCFLAG_ALIGN_FACE = 4
+TCFLAG_ALIGN_LOCKED = 8
+#TCFLAG_ALIGN_MODE = 4|8   # 0 is axis-aligned, 1 is face-aligned, 2 is locked, 3 unused
+#TCFLAG_ALIGN_MODE_SHIFT = 2
 
-TCFLAG_ALL = TCFLAG_ENABLED | TCFLAG_LOCK_AXIS | TCFLAG_OBJECT_SPACE | TCFLAG_ALIGN_FACE
+TCFLAG_ALL = TCFLAG_ENABLED | TCFLAG_OBJECT_SPACE | TCFLAG_ALIGN_FACE | TCFLAG_ALIGN_LOCKED
 
 AUTO_APPLY_UPDATE_INTERVAL = 0.5
 
@@ -117,7 +121,7 @@ def main():
     # re-registering. Lets you press the "Run Script" button without having
     # to maually unregister or run Blender > Reload Scripts first.
     if ('aurycat' in dir(bpy.ops)) and ('nail_unregister' in dir(bpy.ops.aurycat)):
-            bpy.ops.aurycat.nail_unregister()
+        bpy.ops.aurycat.nail_unregister()
     register()
 
 def clss():
@@ -391,15 +395,15 @@ class NAIL_OT_edit_tex_transform(Operator):
         items=space_align_items,
         default='unset')
 
-    plane_align_items = (
-        ('unset',                "<unset>", "Unset or differing values among selected faces"),
-        (str(0),                 "Axis", "Projection is aligned to axis planes"),
-        (str(TCFLAG_ALIGN_FACE), "Face", "Projection is aligned to the face plane"),
-    )
-    plane_align: bpy.props.EnumProperty(
-        name="Plane Alignment",
-        items=plane_align_items,
-        default='unset')
+#    plane_align_items = (
+#        ('unset',                "<unset>", "Unset or differing values among selected faces"),
+#        (str(0),                 "Axis", "Projection is aligned to axis planes"),
+#        (str(TCFLAG_ALIGN_FACE), "Face", "Projection is aligned to the face plane"),
+#    )
+#    plane_align: bpy.props.EnumProperty(
+#        name="Plane Alignment",
+#        items=plane_align_items,
+#        default='unset')
 
     @classmethod
     def poll(cls, context):
@@ -416,16 +420,17 @@ class NAIL_OT_edit_tex_transform(Operator):
         if ( self.set_shift or
              self.set_scale or
              self.set_rotation or
-             self.space_align != 'unset' or
-             self.plane_align != 'unset' ):
+             self.space_align != 'unset' # or
+#             self.plane_align != 'unset'
+             ):
             tc = TextureConfig()
 
             if self.space_align != 'unset':
                 tc.flags_set |= TCFLAG_OBJECT_SPACE
                 tc.flags |= int(self.space_align)
-            if self.plane_align != 'unset':
-                tc.flags_set |= TCFLAG_ALIGN_FACE
-                tc.flags |= int(self.plane_align)
+#            if self.plane_align != 'unset':
+#                tc.flags_set |= TCFLAG_ALIGN_FACE
+#                tc.flags |= int(self.plane_align)
 
             if self.set_shift:
                 tc.shift = Vector(self.shift)
@@ -459,10 +464,10 @@ class NAIL_OT_edit_tex_transform(Operator):
         else:
             self.space_align = 'unset'
 
-        if (tc.flags_set & TCFLAG_ALIGN_FACE) == TCFLAG_ALIGN_FACE:
-            self.plane_align = str(tc.flags & TCFLAG_ALIGN_FACE)
-        else:
-            self.plane_align = 'unset'
+#        if (tc.flags_set & TCFLAG_ALIGN_FACE) == TCFLAG_ALIGN_FACE:
+#            self.plane_align = str(tc.flags & TCFLAG_ALIGN_FACE)
+#        else:
+#            self.plane_align = 'unset'
 
         self.shift = [0,0]
         self.scale = [1,1]
@@ -602,7 +607,7 @@ class NAIL_OT_copy_active_to_selected(Operator):
             return {'CANCELLED'}
 
         tc.flags_set &= ~TCFLAG_ENABLED
-        tc.flags_set &= ~TCFLAG_LOCK_AXIS
+#        tc.flags_set &= ~TCFLAG_LOCK_AXIS
         set_or_apply_selected_faces(tc, context, set=True, apply=True)
         return {'FINISHED'}
 
@@ -1024,19 +1029,19 @@ class NailMesh:
         if f is None:
             return
 
-        # TODO: Investigate what happens if smooth shading is on!
-        # I think normals need to be unsmoothed for this to work right
-#        normal = face.normal
-#        normal = f.transform_attr.to_quaternion() @ normal
-#        if f.world_space:
-#            normal = self.rot_world @ normal
+        if f.align_locked:
+            uaxis = f.lock_uaxis_attr
+            vaxis = f.lock_vaxis_attr
+        else:
+            normal = face.normal
+            if f.world_space:
+                normal = self.rot_world @ normal
+            uaxis, vaxis = self.calc_uvaxes(normal, f.align_face)
 
-#        uaxis, vaxis = self.calc_uvaxes(normal, f.align_face)
-
-        uaxis, vaxis = self.calc_uvaxes(Vector((0,0,1)), False)
-        tq = f.transform_attr.to_quaternion()
-        uaxis = tq @ uaxis
-        vaxis = tq @ vaxis
+#        uaxis, vaxis = self.calc_uvaxes(Vector((0,0,1)), False)
+#        tq = f.transform_attr.to_quaternion()
+#        uaxis = tq @ uaxis
+#        vaxis = tq @ vaxis
 
 #        if f.lock_axis:
 ##            t_center, t_normal, t_tangent = self.calc_face_transform(face, f.world_space, uaxis, vaxis)
@@ -1073,7 +1078,8 @@ class NailMesh:
 
             uv_coord = Vector((vert_coord.dot(uaxis), vert_coord.dot(vaxis)))
             uv_coord.rotate(rotation_mat)
-            uv_coord *= scale
+            uv_coord.x /= scale.x
+            uv_coord.y /= scale.y
             uv_coord += shift
             loop[uv_layer].uv = uv_coord
 
@@ -1099,27 +1105,18 @@ class NailMesh:
                 continue
             first_face = face
             break
-        
+
         if first_face is not None:
-
-#        print("---", len(self.bm.faces), self.bm.faces[0])
             space = Matrix.Translation(-first_face.calc_center_median())
-            mat = space.inverted() @ mat @ space
-            print(mat)
+            ispace = Matrix.Translation(first_face.calc_center_median())
+            mat = ispace @ mat @ space
 
-#        faces = []
-#        mat_copy = mat.copy()
-#        rotateAngles = mat.to_quaternion()
-#        moveDelta = mat.to_translation()
-#        scale = mat.to_scale()
-#        mat.translation.xyz = 0
         for face in self.bm.faces:
             if only_selected and not face.select:
                 continue
             self.locked_transform_one_face(face, mat)
             verts.update(face.verts)
-#            faces.append(face)
-        
+
 #        space = Matrix()#Matrix.Translation(-faces[0].calc_center_median())
         bmesh.ops.transform(self.bm, matrix=mat, verts=list(verts))
 
@@ -1128,15 +1125,49 @@ class NailMesh:
         if f is None:
             return
 
-        mat = mat.copy()
-#        mat.invert()
-        moveDelta = mat.translation.xyz.copy()
-        mat.translation.xyz = 0
-        f.transform_attr @= mat
-        row = f.transform_attr.row
-        face[self.transform_r1_layer] = row[0]
-        face[self.transform_r2_layer] = row[1]
-        face[self.transform_r3_layer] = row[2]
+        if f.align_locked:
+            uaxis = f.lock_uaxis_attr
+            vaxis = f.lock_vaxis_attr
+        else:
+            normal = face.normal
+            if f.world_space:
+                normal = self.rot_world @ normal
+            uaxis, vaxis = self.calc_uvaxes(normal, f.align_face)
+
+        mat_copy = mat.copy()
+        moveDelta = mat_copy.translation.xyz
+        mat_copy.translation.xyz = 0
+
+#        rot_mat = mat.to_quaternion().to_matrix()
+#        rot_mat.resize_4x4()
+
+        uaxis = mat_copy @ uaxis
+        vaxis = mat_copy @ vaxis
+        uLength = uaxis.length
+        vLength = vaxis.length
+#        print(uLength, vLength)
+
+
+        f.scale.x *= uLength
+        f.scale.y *= vLength
+
+        uaxis.normalize()
+        vaxis.normalize()
+        print(moveDelta, f.scale)
+        self.face_offset_texture(face, f, moveDelta, uaxis, vaxis)
+
+        f.lock_uaxis_attr.xyz = uaxis
+        f.lock_vaxis_attr.xyz = vaxis
+
+        flags = f.flags
+        flags = flag_set(flags, TCFLAG_ALIGN_LOCKED)
+        flags = flag_clear(flags, TCFLAG_ALIGN_FACE)
+        f.shift_flags_attr.z = flags
+#        f.transform_attr = rot_mat @ f.transform_attr
+#        row = f.transform_attr.row
+#        face[self.transform_r1_layer] = row[0]
+#        face[self.transform_r2_layer] = row[1]
+#        face[self.transform_r3_layer] = row[2]
 
 #        self.face_offset_texture(face, f, moveDelta, uaxis, vaxis)
 
@@ -1146,21 +1177,20 @@ class NailMesh:
 #        bIsLocking = True
 #        bIsMoving = moveDelta.length_squared > 0.00001
 
-        normal = face.normal
-        normal = f.transform_attr.to_quaternion() @ normal
-        if f.world_space:
-            normal = self.rot_world @ normal
+#        normal = face.normal
+#        normal = f.transform_attr.to_quaternion() @ normal
+#        if f.world_space:
+#            normal = self.rot_world @ normal
 
-        uaxis, vaxis = self.calc_uvaxes(Vector((0,0,1)), False)
-        tq = f.transform_attr.to_quaternion()
-        uaxis = tq @ uaxis
-        vaxis = tq @ vaxis
+#        uaxis, vaxis = self.calc_uvaxes(Vector((0,0,1)), False)
+#        tq = f.transform_attr.to_quaternion()
+#        uaxis = tq @ uaxis
+#        vaxis = tq @ vaxis
 
 #        uaxis, vaxis = self.calc_uvaxes(normal, f.align_face)
 
 ##        if mat.is_identity:
-        self.face_offset_texture(face, f, moveDelta, uaxis, vaxis)
-        print(f.shift_flags_attr.xy)
+#        print(f.shift_flags_attr.xy)
 #            return
 
 #        fscaleU = uaxis.length
@@ -1179,10 +1209,8 @@ class NailMesh:
 #            vaxis = vV / fscaleV
 
 #        if not bUVAxisSameScale: # we stretch / scale axes
-#            f.scale.x *= fscaleU
-#            f.scale.y *= fscaleV
-#            f.scale_rot_attr.x *= fscaleU
-#            f.scale_rot_attr.y *= fscaleV
+
+        face[self.scale_rot_layer].xy = f.scale
 
 #        if bIsMoving:
 #            self.face_offset_texture(face, f, moveDelta, uaxis, vaxis)
@@ -1426,29 +1454,34 @@ class NailMesh:
         nf = NailFace()
         nf.shift_flags_attr = shift_flags_attr
         nf.scale_rot_attr = face[self.scale_rot_layer]
-        nf.lock_center_attr = face[self.lock_center_layer]
-        nf.lock_normal_attr = face[self.lock_normal_layer]
-        nf.lock_tangent_attr = face[self.lock_tangent_layer]
-        nf.lock_bitangent_attr = face[self.lock_bitangent_layer]
-        nf.lock_data_attr = face[self.lock_data_layer]
+#        nf.lock_center_attr = face[self.lock_center_layer]
+#        nf.lock_normal_attr = face[self.lock_normal_layer]
+#        nf.lock_tangent_attr = face[self.lock_tangent_layer]
+#        nf.lock_bitangent_attr = face[self.lock_bitangent_layer]
+#        nf.lock_data_attr = face[self.lock_data_layer]
         nf.lock_uaxis_attr = face[self.lock_uaxis_layer]
         nf.lock_vaxis_attr = face[self.lock_vaxis_layer]
-        nf.axis_rot_attr = face[self.axis_rot_layer]
+#        nf.axis_rot_attr = face[self.axis_rot_layer]
 
-        tr1 = face[self.transform_r1_layer]
-        tr2 = face[self.transform_r2_layer]
-        tr3 = face[self.transform_r3_layer]
+#        tr1 = face[self.transform_r1_layer]
+#        tr2 = face[self.transform_r2_layer]
+#        tr3 = face[self.transform_r3_layer]
 
-        v4def = VEC4_ATTR_DEFAULT
-        if tr1 == v4def and tr2 == v4def and tr3 == v4def:
-            tr1 = Vector((1,0,0,0))
-            tr2 = Vector((0,1,0,0))
-            tr3 = Vector((0,0,1,0))
-            face[self.transform_r1_layer] = tr1
-            face[self.transform_r2_layer] = tr2
-            face[self.transform_r3_layer] = tr3
+#        v4def = VEC4_ATTR_DEFAULT
+#        if tr1 == v4def and tr2 == v4def and tr3 == v4def:
+#            tr1 = Vector((1,0,0,0))
+#            tr2 = Vector((0,1,0,0))
+#            tr3 = Vector((0,0,1,0))
+#            face[self.transform_r1_layer] = tr1
+#            face[self.transform_r2_layer] = tr2
+#            face[self.transform_r3_layer] = tr3
 
-        nf.transform_attr = Matrix([tr1, tr2, tr3, (0,0,0,1)])
+#        nf.transform_attr = Matrix([tr1, tr2, tr3, (0,0,0,1)])
+
+        if nf.lock_uaxis_attr == VEC3_ATTR_DEFAULT:
+            nf.lock_uaxis_attr.xyz = RIGHT_VECTORS[0]
+        if nf.lock_vaxis_attr == VEC3_ATTR_DEFAULT:
+            nf.lock_vaxis_attr.xyz = UP_VECTORS[0]
 
         nf.shift = shift_flags_attr.xy
         nf.scale = validate_scale(nf.scale_rot_attr.xy)
@@ -1456,8 +1489,11 @@ class NailMesh:
 
         nf.flags = flags
         nf.world_space = not flag_is_set(flags, TCFLAG_OBJECT_SPACE)
+        # align_face and align_locked are mutually exclusive
         nf.align_face = flag_is_set(flags, TCFLAG_ALIGN_FACE)
-        nf.lock_axis = flag_is_set(flags, TCFLAG_LOCK_AXIS)
+        nf.align_locked = flag_is_set(flags, TCFLAG_ALIGN_LOCKED)
+#        nf.align_mode = ((flags & TCFLAG_ALIGN_MODE) >> TCFLAG_ALIGN_MODE_SHIFT) #flag_is_set(flags, TCFLAG_ALIGN_FACE)
+#        nf.lock_axis = flag_is_set(flags, TCFLAG_LOCK_AXIS)
         return nf
 
 #        if not lock_axis:
