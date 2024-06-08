@@ -41,7 +41,7 @@ import bpy
 import bmesh
 import math
 import enum
-from bpy.types import Operator
+from bpy.types import Operator, Macro
 from bpy.app.handlers import persistent
 from mathutils import Euler, Vector, Matrix, Quaternion
 from operator import attrgetter
@@ -110,6 +110,9 @@ def clss():
         NAIL_OT_copy_active_to_selected,
         NAIL_OT_locked_transform,
         NailSettings,
+        
+        NAIL_OT_locked_translate_macro,
+        NAIL_OT__internal_finalize_locked_translate,
     )
 
 draw_handler = None
@@ -118,6 +121,7 @@ def register():
     global draw_handler
     for cls in clss():
         bpy.utils.register_class(cls)
+    NAIL_OT_locked_translate_macro.init()
     bpy.types.VIEW3D_PT_view3d_lock.append(draw_lock_rotation)
     bpy.types.VIEW3D_MT_editor_menus.append(nail_draw_main_menu)
 
@@ -140,7 +144,8 @@ def unregister():
         try: bpy.utils.unregister_class(cls)
         except RuntimeError: pass
 
-    bpy.types.SpaceView3D.draw_handler_remove(draw_handler, 'WINDOW')
+    try: bpy.types.SpaceView3D.draw_handler_remove(draw_handler, 'WINDOW')
+    except ValueError: pass
 
 class NAIL_OT_unregister(Operator):
     bl_idname = "aurycat.nail_unregister"
@@ -203,10 +208,11 @@ class NAIL_MT_main_menu(bpy.types.Menu):
         layout.operator(NAIL_OT_clear_tex_transform.bl_idname)
         layout.operator(NAIL_OT_apply_tex_transform.bl_idname)
         layout.operator(NAIL_OT_copy_active_to_selected.bl_idname)
-        layout.operator(NAIL_OT_locked_transform.bl_idname)
+#        layout.operator(NAIL_OT_locked_transform.bl_idname)
 
-#        layout.separator()
-#        layout.label(text="Texture Lock", icon='LOCKED')
+        layout.separator()
+        layout.label(text="Texture Lock", icon='LOCKED')
+        layout.operator(NAIL_OT_locked_translate_macro.bl_idname)
 #        layout.operator(NAIL_OT_mark_axislock.bl_idname)
 #        layout.operator(NAIL_OT_clear_axislock.bl_idname)
 
@@ -633,6 +639,28 @@ class NAIL_OT_locked_transform(Operator):
                     nm.locked_transform(mat)
         return {'FINISHED'}
 
+# Macro operator to concatenate transform and our finalization
+class NAIL_OT_locked_translate_macro(Macro):
+    bl_idname = "aurycat.nail_locked_translate_macro"
+    bl_label = "Texture-Locked Translate"
+
+    @classmethod
+    def init(cls):
+        m = NAIL_OT_locked_translate_macro
+        m.define("TRANSFORM_OT_translate")
+        m.define("AURYCAT_OT_nail__internal_finalize_locked_translate")
+
+# Our finalizing operator, shall run after transform
+class NAIL_OT__internal_finalize_locked_translate(Operator):
+    bl_idname = "aurycat.nail__internal_finalize_locked_translate"
+    bl_label = "Finalize"
+
+    def execute(self, context):
+        print("DONE!")
+        print(bpy.context.active_operator)
+        return {'FINISHED'}
+
+
 
 #############
 ### Utils ###
@@ -821,6 +849,7 @@ class TextureConfig:
         fs = repr_flags(self.flags_set)
         return f"<TextureConfig, f:{f}, fs:{fs}, sh:{self.shift}, sc:{self.scale}, ro:{self.rotation}, mf:{self.multiple_faces}>"
 
+tan_len, bitan_len, fiiiirst, M1 = 0, 0, False, None
 
 class NailMesh:
 
@@ -999,12 +1028,14 @@ class NailMesh:
 
         uaxis, vaxis = self.get_face_uv_axes(face, f)
 
-        center = face.calc_center_median()
-        draw_vec(center, uaxis, (1,0,0))
-        draw_vec(center, vaxis, (0,1,0))
+#        center = face.calc_center_median()
+#        draw_vec(center, uaxis, (1,0,0))
+#        draw_vec(center, vaxis, (0,1,0))
 
         rotation_mat = Matrix.Rotation(f.rotation, 2)
         uv_layer = self.uv_layer
+
+        self.generate_face_axes(face, f)
 
         for loop in face.loops:
             vert_coord = loop.vert.co
@@ -1049,6 +1080,80 @@ class NailMesh:
 
 #        space = Matrix()#Matrix.Translation(-faces[0].calc_center_median())
         bmesh.ops.transform(self.bm, matrix=mat, verts=list(verts))
+
+#    def generate_face_axes(self, face, f):
+#        global tan_len, bitan_len, fiiiirst, M1
+#        center = face.calc_center_median()
+#        vert0 = face.verts[0].co
+#        vert1 = face.verts[1].co
+#        normal = face.normal
+#        if f.world_space:
+#            normal = self.rot_world @ normal
+#            center = self.matrix_world @ center
+#            vert0 = self.matrix_world @ vert0
+#            vert1 = self.matrix_world @ vert1
+#        tangent = vert0 - center
+#        tangent2 = vert1 - center
+#        bitangent = normal.cross(tangent.normalized())
+##        draw_vec(center, normal, (0,0,1))
+##        draw_vec(center, tangent, (0,1,0))
+##        draw_vec(center, tangent2, (0,1,0))
+##        draw_vec(center, bitangent, (0,0,1))
+#        bitangent = tangent2.project(bitangent)
+##        draw_vec(center, bitangent, (1,0,0))
+
+#        M2 = Matrix([(tangent.x,tangent.y,tangent.z,0),
+#                     (bitangent.x,bitangent.y,bitangent.z,0),
+#                     (normal.x,normal.y,normal.z,0),
+#                     (0,0,0,1)])
+
+#        if not fiiiirst:
+#            tan_len = tangent.length
+#            bitan_len = bitangent.length
+#            fiiiirst = True
+#            M1 = M2
+#        else:
+#            M_diff = M1.inverted() @ M2
+#            M_diff.invert()
+##            print(M_diff)
+#            #print(tangent.length/tan_len, " --- ", bitangent.length/bitan_len)
+
+#            up = Vector((0,0,1))
+#            left = Vector((1,0,0))
+#            forward = Vector((0,1,0))
+#            up = M_diff @ up
+#            left = M_diff @ left
+#            forward = M_diff @ forward
+#            origin = Vector((0,0,0))
+#            draw_vec(origin, up, (0,0,1))
+#            draw_vec(origin, left, (1,0,0))
+#            draw_vec(origin, forward, (0,1,0))
+
+
+
+        # get center, vert0, vert1, normal
+        # tangent = vert0-center
+        # tangent2 = vert1-center
+        # bitangent = normal.cross(tangent.normalized())
+        # bitangent scaled by the projection of tangent2 onto bitangent
+        # make a transformation matrix M1
+        #   n0 n1 n2 0    # or something like this idk
+        #   t0 t1 t2 0
+        #   b0 b1 b2 0
+        #   0  0  0  1
+        # repeat that process for the end, get M2
+        # M2 = M? @ M1
+        # M2 @ M1-1 = M? @ M1 @ M1-1
+        # M2 @ M1-1 = M?
+
+#        M2 = M? @ M1
+#        M2 @ M1^-1 = M? @ M1 @ M1^-1
+#        M2 @ M1^-1 = M? @ (M1 @ M1^-1)
+#        M2 @ M1^-1 = M?
+        
+
+        # M? = M1^-1 @ M2
+        # M? = M2^-1 @ M1
 
     def locked_transform_one_face(self, face, mat):
         f = self.unpack_face_data(face)
@@ -1170,23 +1275,23 @@ class NailMesh:
         f.shift_flags_attr = shift_flags_attr
         f.scale_rot_attr = face[self.scale_rot_layer]
         f.lock_uaxis_attr = face[self.lock_uaxis_layer]
-        nf.lock_vaxis_attr = face[self.lock_vaxis_layer]
+        f.lock_vaxis_attr = face[self.lock_vaxis_layer]
 
-        if nf.lock_uaxis_attr == VEC3_ATTR_DEFAULT:
-            nf.lock_uaxis_attr.xyz = RIGHT_VECTORS[0]
-        if nf.lock_vaxis_attr == VEC3_ATTR_DEFAULT:
-            nf.lock_vaxis_attr.xyz = UP_VECTORS[0]
+        if f.lock_uaxis_attr == VEC3_ATTR_DEFAULT:
+            f.lock_uaxis_attr.xyz = RIGHT_VECTORS[0]
+        if f.lock_vaxis_attr == VEC3_ATTR_DEFAULT:
+            f.lock_vaxis_attr.xyz = UP_VECTORS[0]
 
-        nf.shift = shift_flags_attr.xy
-        nf.scale = validate_scale(nf.scale_rot_attr.xy)
-        nf.rotation = nf.scale_rot_attr.z
+        f.shift = shift_flags_attr.xy
+        f.scale = validate_scale(f.scale_rot_attr.xy)
+        f.rotation = f.scale_rot_attr.z
 
-        nf.flags = flags
-        nf.world_space = not flag_is_set(flags, TCFLAG_OBJECT_SPACE)
+        f.flags = flags
+        f.world_space = not flag_is_set(flags, TCFLAG_OBJECT_SPACE)
         # align_face and align_locked are mutually exclusive
-        nf.align_face = flag_is_set(flags, TCFLAG_ALIGN_FACE)
-        nf.align_locked = flag_is_set(flags, TCFLAG_ALIGN_LOCKED)
-        return nf
+        f.align_face = flag_is_set(flags, TCFLAG_ALIGN_FACE)
+        f.align_locked = flag_is_set(flags, TCFLAG_ALIGN_LOCKED)
+        return f
 
 
 import bpy
