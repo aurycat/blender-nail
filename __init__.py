@@ -650,6 +650,10 @@ class NAIL_OT_locked_translate_macro(Macro):
         m.define("TRANSFORM_OT_translate")
         m.define("AURYCAT_OT_nail__internal_finalize_locked_translate")
 
+    def execute(self, context):
+        print("exec macro")
+        return {'FINISHED'}
+
 # Our finalizing operator, shall run after transform
 class NAIL_OT__internal_finalize_locked_translate(Operator):
     bl_idname = "aurycat.nail__internal_finalize_locked_translate"
