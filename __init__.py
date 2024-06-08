@@ -110,9 +110,7 @@ def clss():
         NAIL_OT_copy_active_to_selected,
         NAIL_OT_locked_transform,
         NailSettings,
-        
-        NAIL_OT_locked_translate_macro,
-        NAIL_OT__internal_finalize_locked_translate,
+        TestTranslate,
     )
 
 draw_handler = None
@@ -121,7 +119,6 @@ def register():
     global draw_handler
     for cls in clss():
         bpy.utils.register_class(cls)
-    NAIL_OT_locked_translate_macro.init()
     bpy.types.VIEW3D_PT_view3d_lock.append(draw_lock_rotation)
     bpy.types.VIEW3D_MT_editor_menus.append(nail_draw_main_menu)
 
@@ -187,6 +184,54 @@ class NailSettings(bpy.types.PropertyGroup):
         description="If True, each face's UV island is wrapped to be near (0,0) in UV space. Otherwise, UVs are projected literally from world-space coordinates, meaning the UVs can be very far from (0,0) if the face is far from the world origin")
 
 
+###########################
+### Test Modal Operator ###
+###########################
+
+class TestTranslate(Operator):
+    """Move an object with the mouse, example"""
+    bl_idname = "aurycat.nail_test_translate"
+    bl_label = "Translate"
+    bl_options = {"REGISTER", "UNDO"}
+
+    first_mouse_x: bpy.props.IntProperty()
+    first_value: bpy.props.FloatProperty()
+
+    @classmethod
+    def poll(cls, context):
+        if not shared_poll(cls, context):
+            return False
+        m = context.tool_settings.mesh_select_mode[:]
+        if not (not m[0] and not m[1] and m[2]):
+            cls.poll_message_set("Must be run in face selection mode")
+            return False
+        return True
+
+    def modal(self, context, event):
+        if event.type == 'MOUSEMOVE':
+            delta = self.first_mouse_x - event.mouse_x
+            context.object.location.x = self.first_value + delta * 0.01
+
+        elif event.type == 'LEFTMOUSE':
+            return {'FINISHED'}
+
+        elif event.type in {'RIGHTMOUSE', 'ESC'}:
+            context.object.location.x = self.first_value
+            return {'CANCELLED'}
+
+        return {'RUNNING_MODAL'}
+
+    def invoke(self, context, event):
+        if context.object:
+            self.first_mouse_x = event.mouse_x
+            self.first_value = context.object.location.x
+
+            context.window_manager.modal_handler_add(self)
+            return {'RUNNING_MODAL'}
+        else:
+            self.report({'WARNING'}, "No active object, could not finish")
+            return {'CANCELLED'}
+
 ############
 ### Menu ###
 ############
@@ -197,6 +242,8 @@ class NAIL_MT_main_menu(bpy.types.Menu):
 
     def draw(self, context):
         layout = self.layout
+
+        layout.operator(TestTranslate.bl_idname)
 
         layout.label(text="Enable / Disable Nail (per face)", icon='TOOL_SETTINGS')
         layout.operator(NAIL_OT_mark_nailface.bl_idname)
@@ -212,7 +259,6 @@ class NAIL_MT_main_menu(bpy.types.Menu):
 
         layout.separator()
         layout.label(text="Texture Lock", icon='LOCKED')
-        layout.operator(NAIL_OT_locked_translate_macro.bl_idname)
 #        layout.operator(NAIL_OT_mark_axislock.bl_idname)
 #        layout.operator(NAIL_OT_clear_axislock.bl_idname)
 
@@ -243,6 +289,7 @@ def enable_post_depsgraph_update_handler(enable):
 # https://blender.stackexchange.com/a/283286/154191
 @persistent
 def on_post_depsgraph_update(scene, depsgraph):
+
     # Updating the mesh triggers a depsgraph update; prevent infinite loop
     if on_post_depsgraph_update.timer_ran:
         on_post_depsgraph_update.timer_ran = False
@@ -320,9 +367,9 @@ def do_auto_apply(obj):
 ### Operators ###
 #################
 
-def shared_poll(self, context):
+def shared_poll(cls, context):
     if context.mode != 'EDIT_MESH':
-        self.poll_message_set("Must be run in Edit Mode")
+        cls.poll_message_set("Must be run in Edit Mode")
         return False
     return True
 
@@ -637,21 +684,6 @@ class NAIL_OT_locked_transform(Operator):
             if obj.type == 'MESH':
                 with NailMesh(obj) as nm:
                     nm.locked_transform(mat)
-        return {'FINISHED'}
-
-# Macro operator to concatenate transform and our finalization
-class NAIL_OT_locked_translate_macro(Macro):
-    bl_idname = "aurycat.nail_locked_translate_macro"
-    bl_label = "Texture-Locked Translate"
-
-    @classmethod
-    def init(cls):
-        m = NAIL_OT_locked_translate_macro
-        m.define("TRANSFORM_OT_translate")
-        m.define("AURYCAT_OT_nail__internal_finalize_locked_translate")
-
-    def execute(self, context):
-        print("exec macro")
         return {'FINISHED'}
 
 # Our finalizing operator, shall run after transform
@@ -1039,7 +1071,7 @@ class NailMesh:
         rotation_mat = Matrix.Rotation(f.rotation, 2)
         uv_layer = self.uv_layer
 
-        self.generate_face_axes(face, f)
+#        self.generate_face_axes(face, f)
 
         for loop in face.loops:
             vert_coord = loop.vert.co
