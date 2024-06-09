@@ -111,7 +111,9 @@ def clss():
         NAIL_OT_locked_transform,
         NailSettings,
         NAIL_OT_locked_transform_interactive,
-        NAIL_OT_locked_transform_interactive__do_translate
+        NAIL_OT_locked_transform_interactive__translate,
+        NAIL_OT_locked_transform_interactive__rotate,
+        NAIL_OT_locked_transform_interactive__scale,
     )
 
 draw_handler = None
@@ -667,6 +669,15 @@ class NAIL_OT_locked_transform(Operator):
 
         return {'FINISHED'}
 
+
+######################################################
+### Interactive Texture-locked Transform Operators ###
+######################################################
+
+# This is such a hack, I bet it won't work for long. Developed on Blender 4.1.1.
+# The issue is that making an interactive move/rotate/scale as good as Blender's
+# built-in one would be really hard, so I'm trying to hook into/wrap the default
+# transform operators.
 class NAIL_OT_locked_transform_interactive(Operator):
     bl_idname = "aurycat.nail_locked_transform_interactive"
     bl_label = "Texture-Locked Transform (Interactive)"
@@ -690,6 +701,31 @@ class NAIL_OT_locked_transform_interactive(Operator):
             return False
         return True
 
+    def execute(self, context):
+        if ( (NAIL_OT_locked_transform_interactive.active is not None) and
+             not NAIL_OT_locked_transform_interactive.active.cancelled ):
+            NAIL_OT_locked_transform_interactive.active.cancelled = True
+            self.report({'ERROR'}, "Interactive texture-locked transform operator already running, cancelling both")
+            return {'CANCELLED'}
+
+        NAIL_OT_locked_transform_interactive.active = self
+        self.cancelled = False
+        self.finished = False
+        self.saved_operator = context.active_operator
+
+        if self.mode == 'move':
+            bpy.ops.transform.translate('INVOKE_DEFAULT')
+        elif self.mode == 'rotate':
+            bpy.ops.transform.rotate('INVOKE_DEFAULT')
+        elif self.mode == 'scale':
+            bpy.ops.transform.resize('INVOKE_DEFAULT')
+        else:
+            self.report({'ERROR'}, f"Unrecognized mode {self.mode} for operator {NAIL_OT_locked_transform_interactive.bl_idname}")
+            return {'CANCELLED'}
+
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
     def modal(self, context, event):
         if self.cancelled:
             NAIL_OT_locked_transform_interactive.active = None
@@ -706,6 +742,7 @@ class NAIL_OT_locked_transform_interactive(Operator):
             # this operator, we'll cancel this operator too.
             self.cancelled = True
             return {'PASS_THROUGH'}
+
         if event.type in {'LEFTMOUSE', 'RET'}:
             # A leftclick or return/enter should mean the end of the modal operator.
             # Give it one frame for the underlying transform operator to complete,
@@ -724,11 +761,11 @@ class NAIL_OT_locked_transform_interactive(Operator):
             op = context.active_operator
             if op is not None:
                 if op.bl_idname == "TRANSFORM_OT_translate":
-                    part2_operator = bpy.ops.aurycat.nail_locked_transform_interactive__do_translate
+                    mode = "translate"
                 elif op.bl_idname == "TRANSFORM_OT_rotate":
-                    part2_operator = bpy.ops.aurycat.nail_locked_transform_interactive__do_translate
+                    mode = "rotate"
                 elif op.bl_idname == "TRANSFORM_OT_resize":
-                    part2_operator = bpy.ops.aurycat.nail_locked_transform_interactive__do_translate
+                    mode = "scale"
                 elif op.bl_idname == "TRANSFORM_OT_edge_slide":
                     # Edge slide can be reached via pressing 'g' again in move mode
                     self.report({'ERROR'}, f"Edge slide is not suppoted for texture-locked transforms")
@@ -738,50 +775,49 @@ class NAIL_OT_locked_transform_interactive(Operator):
             else:
                 self.report({'ERROR'}, "Something went wrong when determining the transform operation")
                 return {'CANCELLED'}
+
             NAIL_OT_locked_transform_interactive.active = None
-
-            ot = op.properties.orient_type
-            m = op.properties.orient_matrix.copy()
-            m2 = (m[0][:] + m[1][:] + m[2][:])
-            value = op.properties.value.copy()
-
-            w = context.window
-            a = context.area
-            r = context.region
-            def run_part2():
-                if bpy.context.active_operator.bl_idname == "AURYCAT_OT_nail_locked_transform_interactive":
-                    with bpy.context.temp_override(window=w, area=a, region=r):
-                        # Undo this operator
-                        bpy.ops.ed.undo()
-                        # Undo the transform operator before it
-                        bpy.ops.ed.undo()
-                        part2_operator(modal_hack=True, orient_type=ot, orient_matrix=m2, value=value)
-                else:
-                    # Something has gone wrong
-                    pass
-
-            bpy.app.timers.register(run_part2, first_interval=0)
+            self.finalize_transform(context, op, mode)
             return {'FINISHED'}
 
         return {'PASS_THROUGH'}
 
-    def execute(self, context):
-        NAIL_OT_locked_transform_interactive.active = self
-        self.cancelled = False
-        self.finished = False
-        self.saved_operator = context.active_operator
-        if self.mode == 'move':
-            bpy.ops.transform.translate('INVOKE_DEFAULT')
-        elif self.mode == 'rotate':
-            bpy.ops.transform.rotate('INVOKE_DEFAULT')
-        elif self.mode == 'scale':
-            bpy.ops.transform.resize('INVOKE_DEFAULT')
-        else:
-            raise RuntimeError(f"Unrecognized mode {self.mode} for operator {NAIL_OT_locked_transform_interactive.bl_idname}")
-        context.window_manager.modal_handler_add(self)
-        return {'RUNNING_MODAL'}
+    # mode is "translate", "rotate", or "scale"
+    def finalize_transform(self, context, op, mode):
+        mat = op.properties.orient_matrix.copy()
+        mat_array = (mat[0][:] + mat[1][:] + mat[2][:])
 
-class SharedLockedTransformInteractiveDo:
+        args = {'modal_hack': True, 'orient_matrix': mat_array, 'orient_type': op.properties.orient_type}
+
+        if mode == "translate":
+            finalize_op = bpy.ops.aurycat.nail_locked_transform_interactive__translate
+            args['value'] = op.properties.value.copy()
+        elif mode == "rotate":
+            finalize_op = bpy.ops.aurycat.nail_locked_transform_interactive__rotate
+            args['value'] = op.properties.value
+            args['orient_axis'] = op.properties.orient_axis
+        elif mode == "scale":
+            finalize_op = bpy.ops.aurycat.nail_locked_transform_interactive__scale
+            args['value'] = op.properties.value.copy()
+
+        saved_context = {'window': context.window, 'area': context.area, 'region': context.region}
+        def do_async():
+            if bpy.context.active_operator.bl_idname != "AURYCAT_OT_nail_locked_transform_interactive":
+                async_report_error(f"Something went wrong finalizing this texture-locked transform operation (unexpected active operator {bpy.context.active_operator.bl_idname})")
+                return
+            with bpy.context.temp_override(**saved_context):
+                # Undo this operator
+                bpy.ops.ed.undo()
+                # Undo the transform operator before it
+                bpy.ops.ed.undo()
+                # Run the operator
+                finalize_op(**args)
+
+        # Run part2 asynchronously (i.e. after a very small delay) so that this operator can finish first
+        bpy.app.timers.register(do_async, first_interval=0)
+
+# Operator logic shared across the transform, rotate, and scale finializing operators
+class SharedFinalizeInteractiveTexLockedTransform:
     bl_options = {"REGISTER", "UNDO"}
 
     def orient_type_enum_items(self, _):
@@ -799,28 +835,18 @@ class SharedLockedTransformInteractiveDo:
         name="Orient Type", default="GLOBAL", options={'HIDDEN'})
     orient_type_enum: bpy.props.EnumProperty(
         name="Orientation", items=orient_type_enum_items,
-        description="This must be changed before starting a texture-locked transform operation")
+        description=
+"This is just for reference. In order to change the orientation, change it " +
+"for the whole 3D view before starting the texture-locked transform operation")
 
     orient_matrix: bpy.props.FloatVectorProperty(
         name="Orient", default=[0]*9, subtype='MATRIX', size=9, options={'HIDDEN'})
 
-    # Blender doesn't show the operator popup for some reason
-    # unless it's modal for one frame.
-    modal_hack: bpy.props.BoolProperty(name="", default=False, options={'HIDDEN'})
-    def modal(self, context, event):
-        return {'FINISHED'}
-
-    def draw(self, context):
-        layout = self.layout
-        layout.use_property_split = True
-        layout.use_property_decorate = False
-        layout.prop(self, 'value')
-        s = layout.split()
-        s.enabled = False
-        s.prop(self, 'orient_type_enum')
-
     def execute(self, context):
-        mat = self.get_matrix()        
+        orient = self.orient_matrix.to_4x4()
+        iorient = orient.inverted()
+        mat = iorient @ self.get_matrix() @ orient
+
         for obj in context.objects_in_mode:
             if obj.type == 'MESH':
                 with NailMesh(obj) as nm:
@@ -833,15 +859,49 @@ class SharedLockedTransformInteractiveDo:
         else:
             return {'FINISHED'}
 
-class NAIL_OT_locked_transform_interactive__do_translate(SharedLockedTransformInteractiveDo, Operator):
-    bl_idname = "aurycat.nail_locked_transform_interactive__do_translate"
+    # Somehow the (very hacky) NAIL_OT_locked_transform_interactive operator that runs
+    # right before this one causes Blender to not show the operator HUD/property popup
+    # of this operator. Showing this operator as modal for one frame fixes it.
+    modal_hack: bpy.props.BoolProperty(name="", default=False, options={'HIDDEN'})
+    def modal(self, context, event):
+        return {'FINISHED'}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(self, 'value')
+        if hasattr(self, 'orient_axis'):
+            layout.prop(self, 'orient_axis')
+        s = layout.split()
+        s.enabled = False
+        s.prop(self, 'orient_type_enum')
+
+class NAIL_OT_locked_transform_interactive__translate(SharedFinalizeInteractiveTexLockedTransform, Operator):
+    bl_idname = "aurycat.nail_locked_transform_interactive__translate"
     bl_label = "Texture-Locked Move"
     value: bpy.props.FloatVectorProperty(
-        name="Move", default=[0]*3, subtype='TRANSLATION', size=3, step=10)
+        name="Move", default=[0]*3, subtype='TRANSLATION')
     def get_matrix(self):
-        mat = self.orient_matrix.to_4x4()
-        imat = mat.inverted()
-        return imat @ Matrix.Translation(self.value) @ mat
+        return Matrix.Translation(self.value)
+
+class NAIL_OT_locked_transform_interactive__rotate(SharedFinalizeInteractiveTexLockedTransform, Operator):
+    bl_idname = "aurycat.nail_locked_transform_interactive__rotate"
+    bl_label = "Texture-Locked Rotate"
+    orient_axis: bpy.props.EnumProperty(
+        name="Axis", items=[("X",)*3, ("Y",)*3, ("Z",)*3])
+    value: bpy.props.FloatProperty(
+        name="Angle", default=0, subtype='ANGLE')
+    def get_matrix(self):
+        return Matrix.Rotation(self.value, 4, self.orient_axis)
+
+class NAIL_OT_locked_transform_interactive__scale(SharedFinalizeInteractiveTexLockedTransform, Operator):
+    bl_idname = "aurycat.nail_locked_transform_interactive__scale"
+    bl_label = "Texture-Locked Scale"
+    value: bpy.props.FloatVectorProperty(
+        name="Scale", default=[0]*3, subtype='XYZ')
+    def get_matrix(self):
+        return Matrix.Diagonal(self.value[:] + (1,))
 
 
 #############
@@ -964,6 +1024,12 @@ def flag_set(a, b):
 
 def flag_clear(a, b):
     return a & ~b
+
+# Report error when not in an operator
+def async_report_error(msg):
+    def draw(self, _):
+        self.layout.label(text=msg)
+    bpy.context.window_manager.popup_menu(draw, title="Report: Error", icon='ERROR')
 
 
 ############
