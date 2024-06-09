@@ -111,6 +111,7 @@ def clss():
         NAIL_OT_locked_transform,
         NailSettings,
         NAIL_OT_locked_transform_interactive,
+        NAIL_OT_locked_transform_interactive__do_translate
     )
 
 draw_handler = None
@@ -254,15 +255,6 @@ def on_post_depsgraph_update(scene, depsgraph):
 
     self = on_post_depsgraph_update
 
-    if self.doing_locked_transform:
-        op = bpy.context.active_operator
-        op_changed = op is not self.last_operator
-        self.last_operator = op
-        if op_changed:
-            print("transform done", op)
-            on_post_depsgraph_update.doing_locked_transform = False
-        return
-
     # Updating the mesh triggers a depsgraph update; prevent infinite loop
     if on_post_depsgraph_update.timer_ran:
         on_post_depsgraph_update.timer_ran = False
@@ -313,7 +305,6 @@ def on_post_depsgraph_update(scene, depsgraph):
 on_post_depsgraph_update.last_operator = None
 on_post_depsgraph_update.last_obj_list = []
 on_post_depsgraph_update.timer_ran = False
-on_post_depsgraph_update.doing_locked_transform = False
 
 def depsgraph_update_is_applicable(u):
     if not u.is_updated_transform and not u.is_updated_geometry:
@@ -635,6 +626,11 @@ class NAIL_OT_locked_transform(Operator):
         size=3,
         step=10)
 
+    modal_hack: bpy.props.BoolProperty(
+        name="",
+        default=False,
+        options={'HIDDEN'})
+
     @classmethod
     def poll(cls, context):
         if not shared_poll(cls, context):
@@ -651,6 +647,9 @@ class NAIL_OT_locked_transform(Operator):
         self.rotate = [0,0,0]
         return self.execute(context)
 
+    def modal(self, context, event):
+        return {'FINISHED'}
+
     def execute(self, context):
         sc = Vector(self.scale)
         if isclose(sc.x, 0): sc.x = 1
@@ -662,7 +661,13 @@ class NAIL_OT_locked_transform(Operator):
             if obj.type == 'MESH':
                 with NailMesh(obj) as nm:
                     nm.locked_transform(mat)
-        return {'FINISHED'}
+
+        if self.modal_hack:
+            self.modal_hack = False
+            context.window_manager.modal_handler_add(self)
+            return {'RUNNING_MODAL'}
+        else:
+            return {'FINISHED'}
 
 class NAIL_OT_locked_transform_interactive(Operator):
     bl_idname = "aurycat.nail_locked_transform_interactive"
@@ -691,14 +696,27 @@ class NAIL_OT_locked_transform_interactive(Operator):
         if self.cancelled:
             NAIL_OT_locked_transform_interactive.active = None
             return {'CANCELLED'}
-        elif event.type in {'RIGHTMOUSE', 'ESC'}:
+
+        # Cancel on the next frame
+        if self.finished:
+            self.cancelled = True
+
+        if event.type in {'RIGHTMOUSE', 'ESC'}:
             # Let the event pass through to the internal/underlying transform
             # operator, so it's actually cancelled. But also mark a flag saying
             # the operation is cancelled, so that on the next modal update of
             # this operator, we'll cancel this operator too.
             self.cancelled = True
             return {'PASS_THROUGH'}
-        elif context.active_operator is not self.saved_operator:
+        if event.type in {'LEFTMOUSE', 'RET'}:
+            # A leftclick or return/enter should mean the end of the modal operator.
+            # Give it one frame for the underlying transform operator to complete,
+            # and then mark us as cancelled to avoid this accidentally continuing
+            # forever in unexpected circumstances.
+            self.finished = True
+            return {'PASS_THROUGH'}
+
+        if context.active_operator is not self.saved_operator:
             # context.active_operator would be better named "last_operator", as
             # it only gets set when an operator completes. So, once the underlying
             # transform operator finishes, active_operator will change, and we'll
@@ -708,30 +726,51 @@ class NAIL_OT_locked_transform_interactive(Operator):
             op = context.active_operator
             if op is not None:
                 if op.bl_idname == "TRANSFORM_OT_translate":
-                    print("translate", op.properties.value)
+                    part2_operator = bpy.ops.aurycat.nail_locked_transform_interactive__do_translate
                 elif op.bl_idname == "TRANSFORM_OT_rotate":
-                    print("rotate", op.properties.value)
+                    part2_operator = bpy.ops.aurycat.nail_locked_transform_interactive__do_translate
                 elif op.bl_idname == "TRANSFORM_OT_resize":
-                    print("scale", op.properties.value)
+                    part2_operator = bpy.ops.aurycat.nail_locked_transform_interactive__do_translate
+                elif op.bl_idname == "TRANSFORM_OT_edge_slide":
+                    # Edge slide can be reached via pressing 'g' again in move mode
+                    self.report({'ERROR'}, f"Edge slide is not suppoted for texture-locked transforms")
+                    return {'CANCELLED'}
+                else:
+                    return {'CANCELLED'}
+            else:
+                self.report({'ERROR'}, "Something went wrong when determining the transform operation")
+                return {'CANCELLED'}
             NAIL_OT_locked_transform_interactive.active = None
+
+            ot = op.properties.orient_type
+            m = op.properties.orient_matrix.copy()
+            m2 = (m[0][:] + m[1][:] + m[2][:])
+            value = op.properties.value.copy()
 
             w = context.window
             a = context.area
             r = context.region
-            def go():
-                print("go")
-                print(w, a, r)
-                with bpy.context.temp_override(window=w, area=a, region=r):
-                    bpy.ops.aurycat.nail_locked_transform('INVOKE_DEFAULT')
-            bpy.app.timers.register(go,first_interval=0.5)
-            print("finish")
+            def run_part2():
+                if bpy.context.active_operator.bl_idname == "AURYCAT_OT_nail_locked_transform_interactive":
+                    with bpy.context.temp_override(window=w, area=a, region=r):
+                        # Undo this operator
+                        bpy.ops.ed.undo()
+                        # Undo the transform operator before it
+                        bpy.ops.ed.undo()
+                        part2_operator(modal_hack=True, orient_type=ot, orient_matrix=m2, value=value)
+                else:
+                    # Something has gone wrong
+                    pass
+
+            bpy.app.timers.register(run_part2, first_interval=0)
             return {'FINISHED'}
-        else:
-            return {'PASS_THROUGH'}
+
+        return {'PASS_THROUGH'}
 
     def execute(self, context):
         NAIL_OT_locked_transform_interactive.active = self
         self.cancelled = False
+        self.finished = False
         self.saved_operator = context.active_operator
         if self.mode == 'move':
             bpy.ops.transform.translate('INVOKE_DEFAULT')
@@ -743,6 +782,63 @@ class NAIL_OT_locked_transform_interactive(Operator):
             raise RuntimeError(f"Unrecognized mode {self.mode} for operator {NAIL_OT_locked_transform_interactive.bl_idname}")
         context.window_manager.modal_handler_add(self)
         return {'RUNNING_MODAL'}
+
+class SharedLockedTransformInteractiveDo:
+    bl_options = {"REGISTER", "UNDO"}
+
+    def orient_type_enum_items(self, _):
+        name = self.orient_type
+        if name in {'GLOBAL', 'LOCAL', 'NORMAL', 'GIMBAL', 'VIEW', 'CURSOR', 'PARENT'}:
+            name = name.title()
+        return [('a', name, "")]
+
+    # orient_type is just set to a string value copied from whatever the underlying
+    # transform operator had set. orient_type_enum is a hack to make it possible to
+    # draw the orientation string in a style that looks like an enum in the operator
+    # property window. The enum is always disabled, so it can't be changed. It's just
+    # there to look nice and remind the user what the current orientation is.
+    orient_type: bpy.props.StringProperty(
+        name="Orient Type", default="GLOBAL", options={'HIDDEN'})
+    orient_type_enum: bpy.props.EnumProperty(
+        name="Orientation", items=orient_type_enum_items,
+        description="This must be changed before starting a texture-locked transform operation")
+
+    orient_matrix: bpy.props.FloatVectorProperty(
+        name="Orient", default=[0]*9, subtype='MATRIX', size=9, options={'HIDDEN'})
+
+    # Blender doesn't show the operator popup for some reason
+    # unless it's modal for one frame.
+    modal_hack: bpy.props.BoolProperty(name="", default=False, options={'HIDDEN'})
+    def modal(self, context, event):
+        return {'FINISHED'}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(self, 'value')
+        s = layout.split()
+        s.enabled = False
+        s.prop(self, 'orient_type_enum')
+
+    def execute(self, context):
+        self.nonshared_execute(context)
+        if self.modal_hack:
+            self.modal_hack = False
+            context.window_manager.modal_handler_add(self)
+            return {'RUNNING_MODAL'}
+        else:
+            return {'FINISHED'}
+
+class NAIL_OT_locked_transform_interactive__do_translate(SharedLockedTransformInteractiveDo, Operator):
+    bl_idname = "aurycat.nail_locked_transform_interactive__do_translate"
+    bl_label = "Texture-Locked Move"
+
+    value: bpy.props.FloatVectorProperty(
+        name="Move", default=[0]*3, subtype='TRANSLATION', size=3, step=10)
+
+    def nonshared_execute(self, context):
+        pass
 
 
 #############
