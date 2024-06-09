@@ -110,7 +110,7 @@ def clss():
         NAIL_OT_copy_active_to_selected,
         NAIL_OT_locked_transform,
         NailSettings,
-        NAIL_OT_locked_translate,
+        NAIL_OT_locked_transform_interactive,
     )
 
 draw_handler = None
@@ -119,6 +119,8 @@ def register():
     global draw_handler
     for cls in clss():
         bpy.utils.register_class(cls)
+    NAIL_OT_locked_transform_interactive.active = None
+
     bpy.types.VIEW3D_PT_view3d_lock.append(draw_lock_rotation)
     bpy.types.VIEW3D_MT_editor_menus.append(nail_draw_main_menu)
 
@@ -205,13 +207,16 @@ class NAIL_MT_main_menu(bpy.types.Menu):
         layout.operator(NAIL_OT_clear_tex_transform.bl_idname)
         layout.operator(NAIL_OT_apply_tex_transform.bl_idname)
         layout.operator(NAIL_OT_copy_active_to_selected.bl_idname)
-#        layout.operator(NAIL_OT_locked_transform.bl_idname)
 
         layout.separator()
         layout.label(text="Texture Lock", icon='LOCKED')
-        layout.operator(NAIL_OT_locked_translate.bl_idname)
-#        layout.operator(NAIL_OT_mark_axislock.bl_idname)
-#        layout.operator(NAIL_OT_clear_axislock.bl_idname)
+        o = layout.operator(NAIL_OT_locked_transform_interactive.bl_idname, text="Texture-Locked Move")
+        o.mode = 'move'
+        o = layout.operator(NAIL_OT_locked_transform_interactive.bl_idname, text="Texture-Locked Rotate")
+        o.mode = 'rotate'
+        o = layout.operator(NAIL_OT_locked_transform_interactive.bl_idname, text="Texture-Locked Scale")
+        o.mode = 'scale'
+        layout.operator(NAIL_OT_locked_transform.bl_idname, text="Texture-Locked Transform (Noninteractive)")
 
         layout.separator()
         layout.label(text="Auto-Apply", icon='PROP_ON')
@@ -227,8 +232,8 @@ class NAIL_MT_main_menu(bpy.types.Menu):
         # As a saftey check to make sure this hacky modal operator can't get
         # too off the rails! If somehow our menu is opened, surely the operator
         # should be cancelled.
-        if NAIL_OT_locked_translate.active is not None:
-            NAIL_OT_locked_translate.active.cancelled = True
+        if NAIL_OT_locked_transform_interactive.active is not None:
+            NAIL_OT_locked_transform_interactive.active.cancelled = True
 
 
 ##########################
@@ -659,23 +664,32 @@ class NAIL_OT_locked_transform(Operator):
                     nm.locked_transform(mat)
         return {'FINISHED'}
 
-class NAIL_OT_locked_translate(Operator): # todo rename
-    bl_idname = "aurycat.nail_locked_translate"
-    bl_label = "Texture-Locked Transform"
+class NAIL_OT_locked_transform_interactive(Operator):
+    bl_idname = "aurycat.nail_locked_transform_interactive"
+    bl_label = "Texture-Locked Transform (Interactive)"
     bl_options = {"REGISTER", "UNDO"}
 
     mode: bpy.props.EnumProperty(
         name="Mode",
-        items=[('move', "Move", "Move"), ('rotate', "Rotate", "Rotate"), ('scale', "Scale", "Scale")],,
-        default='move')
+        items=[('move', "Move", "Move"),
+               ('rotate', "Rotate", "Rotate"),
+               ('scale', "Scale", "Scale")],
+        default='move',
+        options={'HIDDEN'})
 
     @classmethod
     def poll(cls, context):
-        return shared_poll(cls, context)
+        if not shared_poll(cls, context):
+            return False
+        m = context.tool_settings.mesh_select_mode[:]
+        if not (not m[0] and not m[1] and m[2]):
+            cls.poll_message_set("Must be run in face selection mode")
+            return False
+        return True
 
     def modal(self, context, event):
         if self.cancelled:
-            NAIL_OT_locked_translate.active = None
+            NAIL_OT_locked_transform_interactive.active = None
             return {'CANCELLED'}
         elif event.type in {'RIGHTMOUSE', 'ESC'}:
             # Let the event pass through to the internal/underlying transform
@@ -698,17 +712,35 @@ class NAIL_OT_locked_translate(Operator): # todo rename
                 elif op.bl_idname == "TRANSFORM_OT_rotate":
                     print("rotate", op.properties.value)
                 elif op.bl_idname == "TRANSFORM_OT_resize":
-                    print("resize", op.properties.value)
-            NAIL_OT_locked_translate.active = None
+                    print("scale", op.properties.value)
+            NAIL_OT_locked_transform_interactive.active = None
+
+            w = context.window
+            a = context.area
+            r = context.region
+            def go():
+                print("go")
+                print(w, a, r)
+                with bpy.context.temp_override(window=w, area=a, region=r):
+                    bpy.ops.aurycat.nail_locked_transform('INVOKE_DEFAULT')
+            bpy.app.timers.register(go,first_interval=0.5)
+            print("finish")
             return {'FINISHED'}
         else:
             return {'PASS_THROUGH'}
 
     def execute(self, context):
-        NAIL_OT_locked_translate.active = self
+        NAIL_OT_locked_transform_interactive.active = self
         self.cancelled = False
         self.saved_operator = context.active_operator
-        bpy.ops.transform.translate('INVOKE_DEFAULT')
+        if self.mode == 'move':
+            bpy.ops.transform.translate('INVOKE_DEFAULT')
+        elif self.mode == 'rotate':
+            bpy.ops.transform.rotate('INVOKE_DEFAULT')
+        elif self.mode == 'scale':
+            bpy.ops.transform.resize('INVOKE_DEFAULT')
+        else:
+            raise RuntimeError(f"Unrecognized mode {self.mode} for operator {NAIL_OT_locked_transform_interactive.bl_idname}")
         context.window_manager.modal_handler_add(self)
         return {'RUNNING_MODAL'}
 
