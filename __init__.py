@@ -252,12 +252,15 @@ def enable_post_depsgraph_update_handler(enable):
 # https://blender.stackexchange.com/a/283286/154191
 @persistent
 def on_post_depsgraph_update(scene, depsgraph):
-
     self = on_post_depsgraph_update
 
     # Updating the mesh triggers a depsgraph update; prevent infinite loop
-    if on_post_depsgraph_update.timer_ran:
-        on_post_depsgraph_update.timer_ran = False
+    if self.timer_ran:
+        self.timer_ran = False
+        return
+
+    # Don't live update while doing a locked transform
+    if NAIL_OT_locked_transform_interactive.active is not None:
         return
 
     # When fast is set, do the apply every depsgraph update
@@ -662,12 +665,7 @@ class NAIL_OT_locked_transform(Operator):
                 with NailMesh(obj) as nm:
                     nm.locked_transform(mat)
 
-        if self.modal_hack:
-            self.modal_hack = False
-            context.window_manager.modal_handler_add(self)
-            return {'RUNNING_MODAL'}
-        else:
-            return {'FINISHED'}
+        return {'FINISHED'}
 
 class NAIL_OT_locked_transform_interactive(Operator):
     bl_idname = "aurycat.nail_locked_transform_interactive"
@@ -822,7 +820,12 @@ class SharedLockedTransformInteractiveDo:
         s.prop(self, 'orient_type_enum')
 
     def execute(self, context):
-        self.nonshared_execute(context)
+        mat = self.get_matrix()        
+        for obj in context.objects_in_mode:
+            if obj.type == 'MESH':
+                with NailMesh(obj) as nm:
+                    nm.locked_transform(mat)
+
         if self.modal_hack:
             self.modal_hack = False
             context.window_manager.modal_handler_add(self)
@@ -833,12 +836,12 @@ class SharedLockedTransformInteractiveDo:
 class NAIL_OT_locked_transform_interactive__do_translate(SharedLockedTransformInteractiveDo, Operator):
     bl_idname = "aurycat.nail_locked_transform_interactive__do_translate"
     bl_label = "Texture-Locked Move"
-
     value: bpy.props.FloatVectorProperty(
         name="Move", default=[0]*3, subtype='TRANSLATION', size=3, step=10)
-
-    def nonshared_execute(self, context):
-        pass
+    def get_matrix(self):
+        mat = self.orient_matrix.to_4x4()
+        imat = mat.inverted()
+        return imat @ Matrix.Translation(self.value) @ mat
 
 
 #############
