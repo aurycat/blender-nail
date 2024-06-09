@@ -110,7 +110,7 @@ def clss():
         NAIL_OT_copy_active_to_selected,
         NAIL_OT_locked_transform,
         NailSettings,
-        TestTranslate,
+        NAIL_OT_locked_translate,
     )
 
 draw_handler = None
@@ -184,54 +184,6 @@ class NailSettings(bpy.types.PropertyGroup):
         description="If True, each face's UV island is wrapped to be near (0,0) in UV space. Otherwise, UVs are projected literally from world-space coordinates, meaning the UVs can be very far from (0,0) if the face is far from the world origin")
 
 
-###########################
-### Test Modal Operator ###
-###########################
-
-class TestTranslate(Operator):
-    """Move an object with the mouse, example"""
-    bl_idname = "aurycat.nail_test_translate"
-    bl_label = "Translate"
-    bl_options = {"REGISTER", "UNDO"}
-
-    first_mouse_x: bpy.props.IntProperty()
-    first_value: bpy.props.FloatProperty()
-
-    @classmethod
-    def poll(cls, context):
-        if not shared_poll(cls, context):
-            return False
-        m = context.tool_settings.mesh_select_mode[:]
-        if not (not m[0] and not m[1] and m[2]):
-            cls.poll_message_set("Must be run in face selection mode")
-            return False
-        return True
-
-    def modal(self, context, event):
-        if event.type == 'MOUSEMOVE':
-            delta = self.first_mouse_x - event.mouse_x
-            context.object.location.x = self.first_value + delta * 0.01
-
-        elif event.type == 'LEFTMOUSE':
-            return {'FINISHED'}
-
-        elif event.type in {'RIGHTMOUSE', 'ESC'}:
-            context.object.location.x = self.first_value
-            return {'CANCELLED'}
-
-        return {'RUNNING_MODAL'}
-
-    def invoke(self, context, event):
-        if context.object:
-            self.first_mouse_x = event.mouse_x
-            self.first_value = context.object.location.x
-
-            context.window_manager.modal_handler_add(self)
-            return {'RUNNING_MODAL'}
-        else:
-            self.report({'WARNING'}, "No active object, could not finish")
-            return {'CANCELLED'}
-
 ############
 ### Menu ###
 ############
@@ -242,8 +194,6 @@ class NAIL_MT_main_menu(bpy.types.Menu):
 
     def draw(self, context):
         layout = self.layout
-
-        layout.operator(TestTranslate.bl_idname)
 
         layout.label(text="Enable / Disable Nail (per face)", icon='TOOL_SETTINGS')
         layout.operator(NAIL_OT_mark_nailface.bl_idname)
@@ -259,6 +209,7 @@ class NAIL_MT_main_menu(bpy.types.Menu):
 
         layout.separator()
         layout.label(text="Texture Lock", icon='LOCKED')
+        layout.operator(NAIL_OT_locked_translate.bl_idname)
 #        layout.operator(NAIL_OT_mark_axislock.bl_idname)
 #        layout.operator(NAIL_OT_clear_axislock.bl_idname)
 
@@ -272,6 +223,12 @@ class NAIL_MT_main_menu(bpy.types.Menu):
 
 #        layout.separator()
 #        layout.operator(NAIL_OT_unregister.bl_idname)
+
+        # As a saftey check to make sure this hacky modal operator can't get
+        # too off the rails! If somehow our menu is opened, surely the operator
+        # should be cancelled.
+        if NAIL_OT_locked_translate.active is not None:
+            NAIL_OT_locked_translate.active.cancelled = True
 
 
 ##########################
@@ -290,6 +247,17 @@ def enable_post_depsgraph_update_handler(enable):
 @persistent
 def on_post_depsgraph_update(scene, depsgraph):
 
+    self = on_post_depsgraph_update
+
+    if self.doing_locked_transform:
+        op = bpy.context.active_operator
+        op_changed = op is not self.last_operator
+        self.last_operator = op
+        if op_changed:
+            print("transform done", op)
+            on_post_depsgraph_update.doing_locked_transform = False
+        return
+
     # Updating the mesh triggers a depsgraph update; prevent infinite loop
     if on_post_depsgraph_update.timer_ran:
         on_post_depsgraph_update.timer_ran = False
@@ -301,8 +269,6 @@ def on_post_depsgraph_update(scene, depsgraph):
             if depsgraph_update_is_applicable(u):
                 do_auto_apply(u.id)
         return
-
-    self = on_post_depsgraph_update
 
     op = bpy.context.active_operator
     op_changed = op is not self.last_operator
@@ -342,6 +308,7 @@ def on_post_depsgraph_update(scene, depsgraph):
 on_post_depsgraph_update.last_operator = None
 on_post_depsgraph_update.last_obj_list = []
 on_post_depsgraph_update.timer_ran = False
+on_post_depsgraph_update.doing_locked_transform = False
 
 def depsgraph_update_is_applicable(u):
     if not u.is_updated_transform and not u.is_updated_geometry:
@@ -665,7 +632,13 @@ class NAIL_OT_locked_transform(Operator):
 
     @classmethod
     def poll(cls, context):
-        return shared_poll(cls, context)
+        if not shared_poll(cls, context):
+            return False
+        m = context.tool_settings.mesh_select_mode[:]
+        if not (not m[0] and not m[1] and m[2]):
+            cls.poll_message_set("Must be run in face selection mode")
+            return False
+        return True
 
     def invoke(self, context, event):
         self.translate = [0,0,0]
@@ -686,16 +659,58 @@ class NAIL_OT_locked_transform(Operator):
                     nm.locked_transform(mat)
         return {'FINISHED'}
 
-# Our finalizing operator, shall run after transform
-class NAIL_OT__internal_finalize_locked_translate(Operator):
-    bl_idname = "aurycat.nail__internal_finalize_locked_translate"
-    bl_label = "Finalize"
+class NAIL_OT_locked_translate(Operator): # todo rename
+    bl_idname = "aurycat.nail_locked_translate"
+    bl_label = "Texture-Locked Transform"
+    bl_options = {"REGISTER", "UNDO"}
+
+    mode: bpy.props.EnumProperty(
+        name="Mode",
+        items=[('move', "Move", "Move"), ('rotate', "Rotate", "Rotate"), ('scale', "Scale", "Scale")],,
+        default='move')
+
+    @classmethod
+    def poll(cls, context):
+        return shared_poll(cls, context)
+
+    def modal(self, context, event):
+        if self.cancelled:
+            NAIL_OT_locked_translate.active = None
+            return {'CANCELLED'}
+        elif event.type in {'RIGHTMOUSE', 'ESC'}:
+            # Let the event pass through to the internal/underlying transform
+            # operator, so it's actually cancelled. But also mark a flag saying
+            # the operation is cancelled, so that on the next modal update of
+            # this operator, we'll cancel this operator too.
+            self.cancelled = True
+            return {'PASS_THROUGH'}
+        elif context.active_operator is not self.saved_operator:
+            # context.active_operator would be better named "last_operator", as
+            # it only gets set when an operator completes. So, once the underlying
+            # transform operator finishes, active_operator will change, and we'll
+            # know we're done. Also conveniently, the operator properties will
+            # have information about the transform, like the basis matrix and
+            # and the operator's value for each axis (e.g. X move amount).
+            op = context.active_operator
+            if op is not None:
+                if op.bl_idname == "TRANSFORM_OT_translate":
+                    print("translate", op.properties.value)
+                elif op.bl_idname == "TRANSFORM_OT_rotate":
+                    print("rotate", op.properties.value)
+                elif op.bl_idname == "TRANSFORM_OT_resize":
+                    print("resize", op.properties.value)
+            NAIL_OT_locked_translate.active = None
+            return {'FINISHED'}
+        else:
+            return {'PASS_THROUGH'}
 
     def execute(self, context):
-        print("DONE!")
-        print(bpy.context.active_operator)
-        return {'FINISHED'}
-
+        NAIL_OT_locked_translate.active = self
+        self.cancelled = False
+        self.saved_operator = context.active_operator
+        bpy.ops.transform.translate('INVOKE_DEFAULT')
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
 
 
 #############
@@ -1091,6 +1106,30 @@ class NailMesh:
             diff_coord0 = wrapped_coord0 - coord0
             for loop in face.loops:
                 loop[uv_layer].uv += diff_coord0
+
+#    def lock(self, only_selected=True):
+#        only_selected = self.me.is_editmode and only_selected
+#        for face in self.bm.faces:
+#            if only_selected and not face.select:
+#                continue
+#        self.lock_face(face)
+
+#    def unlock(self, only_selected=True):
+#        only_selected = self.me.is_editmode and only_selected
+#        for face in self.bm.faces:
+#            if only_selected and not face.select:
+#                continue
+#            self.unlock_face(face)
+
+#    def lock_face(self, face):
+#        f = self.unpack_face_data(face)
+#        if f is None or f.lock_axis:
+#            return
+
+#    def unlock_face(self, face):
+#        f = self.unpack_face_data(face)
+#        if f is None or f.lock_axis:
+#            return
 
     def locked_transform(self, mat, only_selected=True):
         only_selected = self.me.is_editmode and only_selected
