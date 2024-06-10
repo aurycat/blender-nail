@@ -110,6 +110,11 @@ def clss():
         NAIL_OT_copy_active_to_selected,
         NAIL_OT_locked_transform,
         NailSettings,
+        AURYCAT_OT_nail_locked_translate,
+        AURYCAT_OT_nail_locked_rotate,
+        AURYCAT_OT_nail_locked_scale,
+        AURYCAT_OT_nail_keybind_locked_translate,
+        AURYCAT_OT_nail_keybind_locked_rotate,
         NAIL_OT_locked_transform_interactive,
         NAIL_OT_locked_transform_interactive__translate,
         NAIL_OT_locked_transform_interactive__rotate,
@@ -133,12 +138,16 @@ def register():
 
     draw_handler = bpy.types.SpaceView3D.draw_handler_add(debug_draw_3dview, (), 'WINDOW', 'POST_VIEW')
 
+    add_keymaps()
+
 def unregister():
     global draw_handler
     # Set to None before unregistering NailSceneSettings to avoid Blender crash
     bpy.types.WindowManager.nail_settings = None
 
     enable_post_depsgraph_update_handler(False)
+
+    remove_keymaps()
 
     bpy.types.VIEW3D_PT_view3d_lock.remove(draw_lock_rotation)
     bpy.types.VIEW3D_MT_editor_menus.remove(nail_draw_main_menu)
@@ -167,6 +176,40 @@ def draw_lock_rotation(self, context):
     view = context.space_data
     col = layout.column(align=True)
     col.prop(view.region_3d, "lock_rotation", text="Lock View Rotation")
+
+
+###############
+### Keymaps ###
+###############
+
+def keymapped_ops():
+    return [
+        {'idname': AURYCAT_OT_nail_keybind_locked_translate.bl_idname, 'type': 'G', 'value': 'PRESS'},
+        {'idname': AURYCAT_OT_nail_keybind_locked_rotate.bl_idname, 'type': 'R', 'value': 'PRESS'},
+    ]
+
+def add_keymaps():
+    remove_keymaps()
+    wm = bpy.context.window_manager
+    kc = wm.keyconfigs.addon
+    if kc:
+        # Calling 'new' here only makes a new keymap if one doesn't already exist
+        km = kc.keymaps.new(name='Mesh', space_type='EMPTY')
+        for op in keymapped_ops():
+            km.keymap_items.new(**op)
+
+def remove_keymaps():
+    wm = bpy.context.window_manager
+    kc = wm.keyconfigs.addon
+    keymapped_op_names = [op['idname'] for op in keymapped_ops()]
+    if kc:
+        km = kc.keymaps.new(name='Mesh', space_type='EMPTY')
+        to_remove = []
+        for name, kmi in km.keymap_items.items():
+            if name in keymapped_op_names:
+                to_remove.append(kmi)
+        for kmi in to_remove:
+            km.keymap_items.remove(kmi)
 
 
 ################
@@ -212,13 +255,10 @@ class NAIL_MT_main_menu(bpy.types.Menu):
         layout.operator(NAIL_OT_copy_active_to_selected.bl_idname)
 
         layout.separator()
-        layout.label(text="Texture Lock", icon='LOCKED')
-        o = layout.operator(NAIL_OT_locked_transform_interactive.bl_idname, text="Texture-Locked Move")
-        o.mode = 'move'
-        o = layout.operator(NAIL_OT_locked_transform_interactive.bl_idname, text="Texture-Locked Rotate")
-        o.mode = 'rotate'
-        o = layout.operator(NAIL_OT_locked_transform_interactive.bl_idname, text="Texture-Locked Scale")
-        o.mode = 'scale'
+        layout.label(text="Texture Locked Transform", icon='LOCKED')
+        layout.operator(AURYCAT_OT_nail_locked_translate.bl_idname)
+        layout.operator(AURYCAT_OT_nail_locked_rotate.bl_idname)
+        layout.operator(AURYCAT_OT_nail_locked_scale.bl_idname)
         layout.operator(NAIL_OT_locked_transform.bl_idname, text="Texture-Locked Transform (Noninteractive)")
 
         layout.separator()
@@ -335,10 +375,15 @@ def do_auto_apply(obj):
 ### Operators ###
 #################
 
-def shared_poll(cls, context):
+def shared_poll(cls, context, only_face_select=False):
     if context.mode != 'EDIT_MESH':
-        cls.poll_message_set("Must be run in Edit Mode")
+        if cls is not None: cls.poll_message_set("Must be run in Edit Mode")
         return False
+    if only_face_select:
+        m = context.tool_settings.mesh_select_mode[:]
+        if not (not m[0] and not m[1] and m[2]):
+            if cls is not None: cls.poll_message_set("Must be run in face selection mode")
+            return False
     return True
 
 
@@ -638,13 +683,7 @@ class NAIL_OT_locked_transform(Operator):
 
     @classmethod
     def poll(cls, context):
-        if not shared_poll(cls, context):
-            return False
-        m = context.tool_settings.mesh_select_mode[:]
-        if not (not m[0] and not m[1] and m[2]):
-            cls.poll_message_set("Must be run in face selection mode")
-            return False
-        return True
+       return shared_poll(cls, context, only_face_select=True)
 
     def invoke(self, context, event):
         self.translate = [0,0,0]
@@ -674,15 +713,98 @@ class NAIL_OT_locked_transform(Operator):
 ### Interactive Texture-locked Transform Operators ###
 ######################################################
 
+### User-facing operators for menus ###
+
+class AURYCAT_OT_nail_locked_translate(Operator):
+    bl_idname = "aurycat.nail_locked_translate"
+    bl_label = "Texture-Locked Move"
+    bl_options = {"REGISTER"}
+    bl_description = "Move selected faces, adjusting their NailFace shift & scale to keep the texture in the same relative position"
+    @classmethod
+    def poll(cls, context):
+        return shared_poll(cls, context, only_face_select=True)
+    def execute(self, context):
+        bpy.ops.aurycat.nail_locked_transform_interactive('INVOKE_DEFAULT', mode='move')
+        return {'FINISHED'}
+
+class AURYCAT_OT_nail_locked_rotate(Operator):
+    bl_idname = "aurycat.nail_locked_rotate"
+    bl_label = "Texture-Locked Rotate"
+    bl_options = {"REGISTER"}
+    bl_description = "Rotate selected faces, adjusting their NailFace shift, scale, and UV axis to keep the texture in the same relative position"
+    @classmethod
+    def poll(cls, context):
+        return shared_poll(cls, context, only_face_select=True)
+    def execute(self, context):
+        bpy.ops.aurycat.nail_locked_transform_interactive('INVOKE_DEFAULT', mode='rotate')
+        return {'FINISHED'}
+
+class AURYCAT_OT_nail_locked_scale(Operator):
+    bl_idname = "aurycat.nail_locked_scale"
+    bl_label = "Texture-Locked Scale"
+    bl_options = {"REGISTER"}
+    bl_description = "Scale selected faces, adjusting their NailFace shift, scale, and UV axis to keep the texture in the same relative position. Note that scaling operations which shear the mesh will not correctly preserve the texture"
+    @classmethod
+    def poll(cls, context):
+        return shared_poll(cls, context, only_face_select=True)
+    def execute(self, context):
+        bpy.ops.aurycat.nail_locked_transform_interactive('INVOKE_DEFAULT', mode='scale')
+        return {'FINISHED'}
+
+
+### Optional user-facing operators for keybinds ###
+# (No 'keybind' version for locked-scale, since it's not common to want that)
+
+def keybind_poll(context):
+    if not shared_poll(None, context, only_face_select=True):
+        return False
+    # Check for at least one NailMesh object in edit mode
+    for obj in context.objects_in_mode:
+        if NailMesh.is_nail_object(obj):
+            return True
+    return False
+
+# Use this for keybinds.
+# It acts like regular translate when Nail Locked Translate is not applicable
+class AURYCAT_OT_nail_keybind_locked_translate(Operator):
+    bl_idname = "aurycat.nail_keybind_locked_translate"
+    bl_label = "Nail Texture-Locked Move (for Keybind)"
+    bl_options = {"REGISTER"}
+    def execute(self, context):
+        if not keybind_poll(context):
+            bpy.ops.transform.translate('INVOKE_DEFAULT')
+        else:
+            bpy.ops.aurycat.nail_locked_transform_interactive('INVOKE_DEFAULT', mode='move')
+        return {'FINISHED'}
+
+# Use this for keybinds.
+# It acts like regular rotate when Nail Locked Translate is not applicable
+class AURYCAT_OT_nail_keybind_locked_rotate(Operator):
+    bl_idname = "aurycat.nail_keybind_locked_rotate"
+    bl_label = "Nail Texture-Locked Rotate (for Keybind)"
+    bl_options = {"REGISTER"}
+    def execute(self, context):
+        if not keybind_poll(context):
+            bpy.ops.transform.rotate('INVOKE_DEFAULT')
+        else:
+            bpy.ops.aurycat.nail_locked_transform_interactive('INVOKE_DEFAULT', mode='rotate')
+        return {'FINISHED'}
+
+
+### Internal operators, should only be invoked via the user-facing ones ###
+
 # This is such a hack, I bet it won't work for long. Developed on Blender 4.1.1.
 # The issue is that making an interactive move/rotate/scale as good as Blender's
 # built-in one would be really hard, so I'm trying to hook into/wrap the default
 # transform operators.
 class NAIL_OT_locked_transform_interactive(Operator):
     bl_idname = "aurycat.nail_locked_transform_interactive"
-    bl_label = "Texture-Locked Transform (Interactive)"
+    bl_label = "[NAIL INTERNAL] Interactive Texture-Locked Transform"
     bl_options = {"REGISTER", "UNDO"}
 
+    # Note Blenders move/rotate/scale operator can change which they're doing
+    # live, by pressing G/R/S again. So, self.mode isn't necessarily accurate
+    # at the end. 'final_mode' calculated in modal() should be accurate.
     mode: bpy.props.EnumProperty(
         name="Mode",
         items=[('move', "Move", "Move"),
@@ -761,11 +883,11 @@ class NAIL_OT_locked_transform_interactive(Operator):
             op = context.active_operator
             if op is not None:
                 if op.bl_idname == "TRANSFORM_OT_translate":
-                    mode = "translate"
+                    final_mode = "translate"
                 elif op.bl_idname == "TRANSFORM_OT_rotate":
-                    mode = "rotate"
+                    final_mode = "rotate"
                 elif op.bl_idname == "TRANSFORM_OT_resize":
-                    mode = "scale"
+                    final_mode = "scale"
                 elif op.bl_idname == "TRANSFORM_OT_edge_slide":
                     # Edge slide can be reached via pressing 'g' again in move mode
                     self.report({'ERROR'}, f"Edge slide is not suppoted for texture-locked transforms")
@@ -777,33 +899,48 @@ class NAIL_OT_locked_transform_interactive(Operator):
                 return {'CANCELLED'}
 
             NAIL_OT_locked_transform_interactive.active = None
-            self.finalize_transform(context, op, mode)
+            self.finalize_transform(context, op, final_mode)
             return {'FINISHED'}
 
         return {'PASS_THROUGH'}
 
     # mode is "translate", "rotate", or "scale"
-    def finalize_transform(self, context, op, mode):
+    def finalize_transform(self, context, op, final_mode):
         mat = op.properties.orient_matrix.copy()
         mat_array = (mat[0][:] + mat[1][:] + mat[2][:])
 
         args = {'modal_hack': True, 'orient_matrix': mat_array, 'orient_type': op.properties.orient_type}
 
-        if mode == "translate":
+        if final_mode == "translate":
+            underlying_op = "TRANSFORM_OT_translate"
             finalize_op = bpy.ops.aurycat.nail_locked_transform_interactive__translate
             args['value'] = op.properties.value.copy()
-        elif mode == "rotate":
+        elif final_mode == "rotate":
+            underlying_op = "TRANSFORM_OT_rotate"
             finalize_op = bpy.ops.aurycat.nail_locked_transform_interactive__rotate
             args['value'] = op.properties.value
             args['orient_axis'] = op.properties.orient_axis
-        elif mode == "scale":
+        elif final_mode == "scale":
+            underlying_op = "TRANSFORM_OT_resize"
             finalize_op = bpy.ops.aurycat.nail_locked_transform_interactive__scale
             args['value'] = op.properties.value.copy()
 
         saved_context = {'window': context.window, 'area': context.area, 'region': context.region}
         def do_async():
+            # This is hacky so do some sanity checks. Hopefully catches issues in the
+            # case of a Blender change breaking this code.
             if bpy.context.active_operator.bl_idname != "AURYCAT_OT_nail_locked_transform_interactive":
                 async_report_error(f"Something went wrong finalizing this texture-locked transform operation (unexpected active operator {bpy.context.active_operator.bl_idname})")
+                return
+            elif len(bpy.context.window_manager.operators) < 2:
+                async_report_error(f"Something went wrong finalizing this texture-locked transform operation (expected at least two operators in the operator history)")
+                return
+            elif bpy.context.window_manager.operators[-1].bl_idname != "AURYCAT_OT_nail_locked_transform_interactive":
+                # I think operators[-1] is always the same as the active_operator, but just being sure...
+                async_report_error(f"Something went wrong finalizing this texture-locked transform operation (unexpected [-1] operator {bpy.context.window_manager.operators[-1].bl_idname})")
+                return
+            elif bpy.context.window_manager.operators[-2].bl_idname != underlying_op:
+                async_report_error(f"Something went wrong finalizing this texture-locked transform operation (unexpected [-2] operator {bpy.context.window_manager.operators[-2].bl_idname} - expected {underlying_op})")
                 return
             with bpy.context.temp_override(**saved_context):
                 # Undo this operator
@@ -824,7 +961,7 @@ class SharedFinalizeInteractiveTexLockedTransform:
         name = self.orient_type
         if name in {'GLOBAL', 'LOCAL', 'NORMAL', 'GIMBAL', 'VIEW', 'CURSOR', 'PARENT'}:
             name = name.title()
-        return [('a', name, "")]
+        return [('x', name, "")]
 
     # orient_type is just set to a string value copied from whatever the underlying
     # transform operator had set. orient_type_enum is a hack to make it possible to
@@ -879,7 +1016,7 @@ class SharedFinalizeInteractiveTexLockedTransform:
 
 class NAIL_OT_locked_transform_interactive__translate(SharedFinalizeInteractiveTexLockedTransform, Operator):
     bl_idname = "aurycat.nail_locked_transform_interactive__translate"
-    bl_label = "Texture-Locked Move"
+    bl_label = "Nail Texture-Locked Move"
     value: bpy.props.FloatVectorProperty(
         name="Move", default=[0]*3, subtype='TRANSLATION')
     def get_matrix(self):
@@ -887,17 +1024,20 @@ class NAIL_OT_locked_transform_interactive__translate(SharedFinalizeInteractiveT
 
 class NAIL_OT_locked_transform_interactive__rotate(SharedFinalizeInteractiveTexLockedTransform, Operator):
     bl_idname = "aurycat.nail_locked_transform_interactive__rotate"
-    bl_label = "Texture-Locked Rotate"
+    bl_label = "Nail Texture-Locked Rotate"
     orient_axis: bpy.props.EnumProperty(
-        name="Axis", items=[("X",)*3, ("Y",)*3, ("Z",)*3])
+        name="Axis", items=[('X',"X","X"), ('Y',"Y","Y"), ('Z',"Z","Z")])
     value: bpy.props.FloatProperty(
         name="Angle", default=0, subtype='ANGLE')
     def get_matrix(self):
-        return Matrix.Rotation(self.value, 4, self.orient_axis)
+        v = self.value
+        # I'm not sure why the value needs to be negated for 'VIEW' orientations
+        if self.orient_type == 'VIEW': v = -v
+        return Matrix.Rotation(v, 4, self.orient_axis)
 
 class NAIL_OT_locked_transform_interactive__scale(SharedFinalizeInteractiveTexLockedTransform, Operator):
     bl_idname = "aurycat.nail_locked_transform_interactive__scale"
-    bl_label = "Texture-Locked Scale"
+    bl_label = "Nail Texture-Locked Scale"
     value: bpy.props.FloatVectorProperty(
         name="Scale", default=[0]*3, subtype='XYZ')
     def get_matrix(self):
