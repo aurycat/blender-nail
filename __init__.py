@@ -145,18 +145,24 @@ def unregister():
     # Set to None before unregistering NailSceneSettings to avoid Blender crash
     bpy.types.WindowManager.nail_settings = None
 
-    enable_post_depsgraph_update_handler(False)
+    try: enable_post_depsgraph_update_handler(False)
+    except: pass
 
-    remove_keymaps()
+    try: bpy.types.VIEW3D_PT_view3d_lock.remove(draw_lock_rotation)
+    except: pass
 
-    bpy.types.VIEW3D_PT_view3d_lock.remove(draw_lock_rotation)
-    bpy.types.VIEW3D_MT_editor_menus.remove(nail_draw_main_menu)
+    try: bpy.types.VIEW3D_MT_editor_menus.remove(nail_draw_main_menu)
+    except: pass
+
     for cls in clss():
         try: bpy.utils.unregister_class(cls)
-        except RuntimeError: pass
+        except: pass
+
+    try: remove_keymaps()
+    except: pass
 
     try: bpy.types.SpaceView3D.draw_handler_remove(draw_handler, 'WINDOW')
-    except ValueError: pass
+    except: pass
 
 class NAIL_OT_unregister(Operator):
     bl_idname = "aurycat.nail_unregister"
