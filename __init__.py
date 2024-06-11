@@ -41,6 +41,7 @@ import bpy
 import bmesh
 import math
 import enum
+import traceback
 from bpy.types import Operator, Macro
 from bpy.app.handlers import persistent
 from mathutils import Euler, Vector, Matrix, Quaternion
@@ -83,21 +84,8 @@ TCFLAG_ALL = TCFLAG_ENABLED | TCFLAG_OBJECT_SPACE | TCFLAG_ALIGN_FACE | TCFLAG_A
 
 AUTO_APPLY_UPDATE_INTERVAL = 0.5
 
-
-############
-### Init ###
-############
-
-def main():
-    # Invoke unregister op on an existing "install" of the plugin before
-    # re-registering. Lets you press the "Run Script" button without having
-    # to maually unregister or run Blender > Reload Scripts first.
-    if ('aurycat' in dir(bpy.ops)) and ('nail_unregister' in dir(bpy.ops.aurycat)):
-        bpy.ops.aurycat.nail_unregister()
-    register()
-
-def clss():
-    return (
+def nail_classes():
+    return [
         NAIL_OT_edit_tex_transform,
         NAIL_OT_unregister,
         NAIL_MT_main_menu,
@@ -119,69 +107,119 @@ def clss():
         NAIL_OT_locked_transform_interactive__translate,
         NAIL_OT_locked_transform_interactive__rotate,
         NAIL_OT_locked_transform_interactive__scale,
-    )
+    ]
+
+
+#############################
+### Register / Unregister ###
+#############################
 
 draw_handler = None
 
+def main():
+    # Invoke unregister op on an existing "install" of the plugin before
+    # re-registering. Lets you press the "Run Script" button without having
+    # to maually unregister or run Blender > Reload Scripts first.
+    if ('aurycat' in dir(bpy.ops)) and ('nail_unregister' in dir(bpy.ops.aurycat)):
+        bpy.ops.aurycat.nail_unregister()
+    register()
+    on_load_post()
+
 def register():
-    global draw_handler
-    for cls in clss():
+    for cls in nail_classes():
         bpy.utils.register_class(cls)
+
     NAIL_OT_locked_transform_interactive.active = None
+
+    bpy.types.WindowManager.nail_settings = bpy.props.PointerProperty(name='Nail Settings', type=NailSettings)
 
     bpy.types.VIEW3D_PT_view3d_lock.append(draw_lock_rotation)
     bpy.types.VIEW3D_MT_editor_menus.append(nail_draw_main_menu)
 
-    bpy.types.WindowManager.nail_settings = bpy.props.PointerProperty(name='Nail Settings', type=NailSettings)
-    auto_apply_updated(None, bpy.context)
-    WRAP_UVS = bpy.context.window_manager.nail_settings.wrap_uvs
-
-    draw_handler = bpy.types.SpaceView3D.draw_handler_add(debug_draw_3dview, (), 'WINDOW', 'POST_VIEW')
-
-    add_keymaps()
+    set_load_post_handler_enabled(True)
 
 def unregister():
-    global draw_handler
-    # Set to None before unregistering NailSceneSettings to avoid Blender crash
-    bpy.types.WindowManager.nail_settings = None
-
-    try: enable_post_depsgraph_update_handler(False)
-    except: pass
-
-    try: bpy.types.VIEW3D_PT_view3d_lock.remove(draw_lock_rotation)
-    except: pass
-
-    try: bpy.types.VIEW3D_MT_editor_menus.remove(nail_draw_main_menu)
-    except: pass
-
-    for cls in clss():
-        try: bpy.utils.unregister_class(cls)
-        except: pass
-
-    try: remove_keymaps()
-    except: pass
-
-    try: bpy.types.SpaceView3D.draw_handler_remove(draw_handler, 'WINDOW')
-    except: pass
+    no_except(lambda: set_load_post_handler_enabled(False))
+    no_except(lambda: bpy.types.VIEW3D_PT_view3d_lock.remove(draw_lock_rotation))
+    no_except(lambda: bpy.types.VIEW3D_MT_editor_menus.remove(nail_draw_main_menu))
+    # Set nail_settings to None before unregistering NailSceneSettings to avoid
+    # Blender crash (Use setattr since you can't use = assignment in a lambda)
+    no_except(lambda: setattr(bpy.types.WindowManager, 'nail_settings', None))
+    for cls in nail_classes():
+        no_except(lambda: bpy.utils.unregister_class(cls))
 
 class NAIL_OT_unregister(Operator):
     bl_idname = "aurycat.nail_unregister"
     bl_label = "Unregister"
+    bl_description = "Unregister Nail addon"
     bl_options = {"REGISTER"}
-
     def execute(self, context):
         unregister()
         return {'FINISHED'}
 
-def nail_draw_main_menu(self, context):
-    if context.mode == 'EDIT_MESH':
-        self.layout.menu(NAIL_MT_main_menu.bl_idname)
 
-def draw_lock_rotation(self, context):
-    layout = self.layout
-    view = context.space_data
-    col = layout.column(align=True)
-    col.prop(view.region_3d, "lock_rotation", text="Lock View Rotation")
+#######################
+### Awake / Unawake ###
+#######################
+
+# Nail is "awake" when a blend file has been loaded that contains a NailMesh,
+# or when a NailMesh is created. When Nail is awake, keymaps and handler events
+# are registered. When asleep, they're unregistered. This reduces the chance
+# that Nail will cause performance issues or other bugs when it's not needed.
+
+nail_is_awake = False
+
+def set_load_post_handler_enabled(enable):
+    set_handler_enabled(bpy.app.handlers.load_post, on_load_post, enable)
+
+@persistent
+def on_load_post():
+    for obj in bpy.data.objects:
+        if NailMesh.is_nail_object(obj):
+            nail_wake()
+            return
+    nail_sleep()
+
+def nail_wake():
+    global nail_is_awake, draw_handler
+
+    if nail_is_awake:
+        return
+
+    print("** Nail addon wake")
+
+    add_keymaps()
+    draw_handler = bpy.types.SpaceView3D.draw_handler_add(debug_draw_3dview, (), 'WINDOW', 'POST_VIEW')
+    auto_apply_updated(None, bpy.context)
+
+    nail_is_awake = True
+
+def nail_sleep():
+    global nail_is_awake, draw_handler
+
+    if not nail_is_awake:
+        return
+
+    no_except(lambda: enable_post_depsgraph_update_handler(False))
+    no_except(lambda: bpy.types.SpaceView3D.draw_handler_remove(draw_handler, 'WINDOW'))
+    no_except(lambda: remove_keymaps())
+
+    print("** Nail addon sleep")
+
+    nail_is_awake = False
+
+class NAIL_OT_unregister(Operator):
+    bl_idname = "aurycat.nail_sleep"
+    bl_label = "Nail Sleep"
+    bl_description = \
+"Manually put Nail addon to sleep (unregister handlers and keybinds). " + \
+"This is done automatically when loading a new file which does not " + \
+"contain NailMesh objects. Nail can be awoken by loading a file with " + \
+"NailMesh objects, or by using Mark NailFace"
+    bl_options = {"REGISTER"}
+    def execute(self, context):
+        nail_sleep()
+        return {'FINISHED'}
 
 
 ###############
@@ -242,6 +280,16 @@ class NailSettings(bpy.types.PropertyGroup):
 ### Menu ###
 ############
 
+def nail_draw_main_menu(self, context):
+    if context.mode == 'EDIT_MESH':
+        self.layout.menu(NAIL_MT_main_menu.bl_idname)
+
+def draw_lock_rotation(self, context):
+    layout = self.layout
+    view = context.space_data
+    col = layout.column(align=True)
+    col.prop(view.region_3d, "lock_rotation", text="Lock View Rotation")
+
 class NAIL_MT_main_menu(bpy.types.Menu):
     bl_idname = "NAIL_MT_main_menu"
     bl_label = "Nail"
@@ -290,12 +338,7 @@ class NAIL_MT_main_menu(bpy.types.Menu):
 ##########################
 
 def enable_post_depsgraph_update_handler(enable):
-    if enable:
-        if on_post_depsgraph_update not in bpy.app.handlers.depsgraph_update_post:
-            bpy.app.handlers.depsgraph_update_post.append(on_post_depsgraph_update)
-    else:
-        if on_post_depsgraph_update in bpy.app.handlers.depsgraph_update_post:
-            bpy.app.handlers.depsgraph_update_post.remove(on_post_depsgraph_update)
+    set_handler_enabled(bpy.app.handlers.depsgraph_update_post, on_post_depsgraph_update, enable)
 
 # https://blender.stackexchange.com/a/283286/154191
 @persistent
@@ -1177,6 +1220,21 @@ def async_report_error(msg):
         self.layout.label(text=msg)
     bpy.context.window_manager.popup_menu(draw, title="Report: Error", icon='ERROR')
 
+def set_handler_enabled(handler_list, func, enable):
+    if enable:
+        if func not in handler_list:
+            handler_list.append(func)
+    else:
+        if func in handler_list:
+            handler_list.remove(func)
+
+def no_except(func):
+    try:
+        func()
+    except Exception as e:
+        print("Error in Nail addon:")
+        print(traceback.format_exc())
+
 
 ############
 ### Main ###
@@ -1284,7 +1342,9 @@ class NailMesh:
         self.bm = None
         self.me = None
 
-    def init_attrs(self):
+    def init_attrs(self):        
+        nail_wake()
+
         if len(self.bm.loops.layers.uv) == 0:
             self.bm.loops.layers.uv.new("UVMap")
         elif self.bm.loops.layers.uv.active is None:
