@@ -56,9 +56,6 @@ face_vec3_getter = attrgetter("faces.layers.float_vector")
 # float_color is the only vec4 attribute accessible by BMesh >:(
 face_vec4_getter = attrgetter("faces.layers.float_color")
 
-VEC3_ATTR_DEFAULT = Vector((0,0,0)).freeze()
-VEC4_ATTR_DEFAULT = Vector((1,1,1,1)).freeze()
-
 ATTRS = {
     # ShiftFlags and ScaleRot each combine two pieces of data into one attribute.
     # This is because bmesh doesn't support accessing a per-face 2D Vector attribute,
@@ -69,6 +66,8 @@ ATTRS = {
     "Nail_LockVAxis":      ('FACE', 'FLOAT_VECTOR', face_vec3_getter, 'lock_vaxis_layer'),
 }
 
+VEC3_ATTR_DEFAULT = Vector((0,0,0)).freeze()
+VEC4_ATTR_DEFAULT = Vector((1,1,1,1)).freeze()
 
 # TextureConfig flags. The bitmask is stored per-face, in the z coordinate of Nail_ShiftFlags
 TCFLAG_ENABLED = 1        # True to use Nail on this face, otherwise Nail will ignore it.
@@ -86,28 +85,26 @@ AUTO_APPLY_UPDATE_INTERVAL = 0.5
 
 def nail_classes():
     return [
-        NAIL_OT_edit_tex_transform,
-        NAIL_OT_unregister,
-        NAIL_MT_main_menu,
-        NAIL_OT_clear_tex_transform,
-        NAIL_OT_apply_tex_transform,
-        NAIL_OT_mark_nailface,
-        NAIL_OT_clear_nailface,
-#        NAIL_OT_mark_axislock,
-#        NAIL_OT_clear_axislock,
-        NAIL_OT_copy_active_to_selected,
-        NAIL_OT_locked_transform,
+        AURYCAT_OT_nail_unregister,
+        AURYCAT_OT_nail_sleep,
         NailSettings,
+        AURYCAT_MT_nail_main_menu,
+        AURYCAT_OT_nail_mark_nailface,
+        AURYCAT_OT_nail_clear_nailface,
+        AURYCAT_OT_nail_edit_tex_transform,
+        AURYCAT_OT_nail_clear_tex_transform,
+        AURYCAT_OT_nail_apply_tex_transform,
+        AURYCAT_OT_nail_copy_active_to_selected,
+        AURYCAT_OT_nail_locked_transform,
         AURYCAT_OT_nail_locked_translate,
         AURYCAT_OT_nail_locked_rotate,
         AURYCAT_OT_nail_locked_scale,
         AURYCAT_OT_nail_keybind_locked_translate,
         AURYCAT_OT_nail_keybind_locked_rotate,
-        NAIL_OT_locked_transform_interactive,
-        NAIL_OT_locked_transform_interactive__translate,
-        NAIL_OT_locked_transform_interactive__rotate,
-        NAIL_OT_locked_transform_interactive__scale,
-    ]
+        AURYCAT_OT_nail_locked_transform_interactive,
+        AURYCAT_OT_nail_locked_transform_interactive__translate,
+        AURYCAT_OT_nail_locked_transform_interactive__rotate,
+        AURYCAT_OT_nail_locked_transform_interactive__scale,
 
 
 #############################
@@ -129,7 +126,7 @@ def register():
     for cls in nail_classes():
         bpy.utils.register_class(cls)
 
-    NAIL_OT_locked_transform_interactive.active = None
+    AURYCAT_OT_nail_locked_transform_interactive.active = None
 
     bpy.types.WindowManager.nail_settings = bpy.props.PointerProperty(name='Nail Settings', type=NailSettings)
 
@@ -148,7 +145,7 @@ def unregister():
     for cls in nail_classes():
         no_except(lambda: bpy.utils.unregister_class(cls))
 
-class NAIL_OT_unregister(Operator):
+class AURYCAT_OT_nail_unregister(Operator):
     bl_idname = "aurycat.nail_unregister"
     bl_label = "Unregister"
     bl_description = "Unregister Nail addon"
@@ -158,9 +155,9 @@ class NAIL_OT_unregister(Operator):
         return {'FINISHED'}
 
 
-#######################
-### Awake / Unawake ###
-#######################
+#####################
+### Awake / Sleep ###
+#####################
 
 # Nail is "awake" when a blend file has been loaded that contains a NailMesh,
 # or when a NailMesh is created. When Nail is awake, keymaps and handler events
@@ -208,7 +205,7 @@ def nail_sleep():
 
     nail_is_awake = False
 
-class NAIL_OT_unregister(Operator):
+class AURYCAT_OT_nail_sleep(Operator):
     bl_idname = "aurycat.nail_sleep"
     bl_label = "Nail Sleep"
     bl_description = \
@@ -282,7 +279,7 @@ class NailSettings(bpy.types.PropertyGroup):
 
 def nail_draw_main_menu(self, context):
     if context.mode == 'EDIT_MESH':
-        self.layout.menu(NAIL_MT_main_menu.bl_idname)
+        self.layout.menu(AURYCAT_MT_nail_main_menu.bl_idname)
 
 def draw_lock_rotation(self, context):
     layout = self.layout
@@ -290,30 +287,30 @@ def draw_lock_rotation(self, context):
     col = layout.column(align=True)
     col.prop(view.region_3d, "lock_rotation", text="Lock View Rotation")
 
-class NAIL_MT_main_menu(bpy.types.Menu):
-    bl_idname = "NAIL_MT_main_menu"
+class AURYCAT_MT_nail_main_menu(bpy.types.Menu):
+    bl_idname = "AURYCAT_MT_nail_main_menu"
     bl_label = "Nail"
 
     def draw(self, context):
         layout = self.layout
 
         layout.label(text="Enable / Disable Nail (per face)", icon='TOOL_SETTINGS')
-        layout.operator(NAIL_OT_mark_nailface.bl_idname)
-        layout.operator(NAIL_OT_clear_nailface.bl_idname)
+        layout.operator(AURYCAT_OT_nail_mark_nailface.bl_idname)
+        layout.operator(AURYCAT_OT_nail_clear_nailface.bl_idname)
 
         layout.separator()
         layout.label(text="Edit Texture Transforms", icon='UV_DATA')
-        layout.operator(NAIL_OT_edit_tex_transform.bl_idname)
-        layout.operator(NAIL_OT_clear_tex_transform.bl_idname)
-        layout.operator(NAIL_OT_apply_tex_transform.bl_idname)
-        layout.operator(NAIL_OT_copy_active_to_selected.bl_idname)
+        layout.operator(AURYCAT_OT_nail_edit_tex_transform.bl_idname)
+        layout.operator(AURYCAT_OT_nail_clear_tex_transform.bl_idname)
+        layout.operator(AURYCAT_OT_nail_apply_tex_transform.bl_idname)
+        layout.operator(AURYCAT_OT_nail_copy_active_to_selected.bl_idname)
 
         layout.separator()
         layout.label(text="Texture Locked Transform", icon='LOCKED')
         layout.operator(AURYCAT_OT_nail_locked_translate.bl_idname)
         layout.operator(AURYCAT_OT_nail_locked_rotate.bl_idname)
         layout.operator(AURYCAT_OT_nail_locked_scale.bl_idname)
-        layout.operator(NAIL_OT_locked_transform.bl_idname, text="Texture-Locked Transform (Noninteractive)")
+        layout.operator(AURYCAT_OT_nail_locked_transform.bl_idname, text="Texture-Locked Transform (Noninteractive)")
 
         layout.separator()
         layout.label(text="Auto-Apply", icon='PROP_ON')
@@ -324,13 +321,13 @@ class NAIL_MT_main_menu(bpy.types.Menu):
         s.enabled = bpy.context.window_manager.nail_settings.auto_apply
 
 #        layout.separator()
-#        layout.operator(NAIL_OT_unregister.bl_idname)
+#        layout.operator(AURYCAT_OT_nail_unregister.bl_idname)
 
         # As a saftey check to make sure this hacky modal operator can't get
         # too off the rails! If somehow our menu is opened, surely the operator
         # should be cancelled.
-        if NAIL_OT_locked_transform_interactive.active is not None:
-            NAIL_OT_locked_transform_interactive.active.cancelled = True
+        if AURYCAT_OT_nail_locked_transform_interactive.active is not None:
+            AURYCAT_OT_nail_locked_transform_interactive.active.cancelled = True
 
 
 ##########################
@@ -351,7 +348,7 @@ def on_post_depsgraph_update(scene, depsgraph):
         return
 
     # Don't live update while doing a locked transform
-    if NAIL_OT_locked_transform_interactive.active is not None:
+    if AURYCAT_OT_nail_locked_transform_interactive.active is not None:
         return
 
     # When fast is set, do the apply every depsgraph update
@@ -436,7 +433,7 @@ def shared_poll(cls, context, only_face_select=False):
     return True
 
 
-class NAIL_OT_edit_tex_transform(Operator):
+class AURYCAT_OT_nail_edit_tex_transform(Operator):
     bl_idname = "aurycat.nail_edit_tex_transform"
     bl_label = "Edit Transform"
     bl_options = {"REGISTER", "UNDO"}
@@ -575,7 +572,7 @@ class NAIL_OT_edit_tex_transform(Operator):
         return context.window_manager.invoke_props_popup(self, event)
 
 
-class NAIL_OT_apply_tex_transform(Operator):
+class AURYCAT_OT_nail_apply_tex_transform(Operator):
     bl_idname = "aurycat.nail_apply_tex_transform"
     bl_label = "Reapply Transform"
     bl_options = {"REGISTER", "UNDO"}
@@ -590,7 +587,7 @@ class NAIL_OT_apply_tex_transform(Operator):
         return {'FINISHED'}
 
 
-class NAIL_OT_clear_tex_transform(Operator):
+class AURYCAT_OT_nail_clear_tex_transform(Operator):
     bl_idname = "aurycat.nail_clear_tex_transform"
     bl_label = "Clear Transform"
     bl_options = {"REGISTER", "UNDO"}
@@ -607,7 +604,7 @@ class NAIL_OT_clear_tex_transform(Operator):
         return {'FINISHED'}
 
 
-class NAIL_OT_mark_nailface(Operator):
+class AURYCAT_OT_nail_mark_nailface(Operator):
     bl_idname = "aurycat.nail_mark_nailface"
     bl_label = "Mark NailFace"
     bl_options = {"REGISTER", "UNDO"}
@@ -625,7 +622,7 @@ class NAIL_OT_mark_nailface(Operator):
         return {'FINISHED'}
 
 
-class NAIL_OT_clear_nailface(Operator):
+class AURYCAT_OT_nail_clear_nailface(Operator):
     bl_idname = "aurycat.nail_clear_nailface"
     bl_label = "Clear NailFace"
     bl_options = {"REGISTER", "UNDO"}
@@ -642,7 +639,7 @@ class NAIL_OT_clear_nailface(Operator):
         return {'FINISHED'}
 
 
-class NAIL_OT_mark_axislock(Operator):
+class AURYCAT_OT_nail_mark_axislock(Operator):
     bl_idname = "aurycat.nail_mark_axislock"
     bl_label = "Mark Axis Lock"
     bl_options = {"REGISTER", "UNDO"}
@@ -660,7 +657,7 @@ class NAIL_OT_mark_axislock(Operator):
         return {'FINISHED'}
 
 
-class NAIL_OT_clear_axislock(Operator):
+class AURYCAT_OT_nail_clear_axislock(Operator):
     bl_idname = "aurycat.nail_clear_axislock"
     bl_label = "Clear Axis Lock"
     bl_options = {"REGISTER", "UNDO"}
@@ -677,7 +674,7 @@ class NAIL_OT_clear_axislock(Operator):
                     nm.unlock()
         return {'FINISHED'}
 
-class NAIL_OT_copy_active_to_selected(Operator):
+class AURYCAT_OT_nail_copy_active_to_selected(Operator):
     bl_idname = "aurycat.nail_copy_active_to_selected"
     bl_label = "Copy Active to Selected"
     bl_options = {"REGISTER", "UNDO"}
@@ -698,7 +695,7 @@ class NAIL_OT_copy_active_to_selected(Operator):
         set_or_apply_selected_faces(tc, context, set=True, apply=True)
         return {'FINISHED'}
 
-class NAIL_OT_locked_transform(Operator):
+class AURYCAT_OT_nail_locked_transform(Operator):
     bl_idname = "aurycat.nail_locked_transform"
     bl_label = "Texture-Locked Transform"
     bl_options = {"REGISTER", "UNDO"}
@@ -846,7 +843,7 @@ class AURYCAT_OT_nail_keybind_locked_rotate(Operator):
 # The issue is that making an interactive move/rotate/scale as good as Blender's
 # built-in one would be really hard, so I'm trying to hook into/wrap the default
 # transform operators.
-class NAIL_OT_locked_transform_interactive(Operator):
+class AURYCAT_OT_nail_locked_transform_interactive(Operator):
     bl_idname = "aurycat.nail_locked_transform_interactive"
     bl_label = "[NAIL INTERNAL] Interactive Texture-Locked Transform"
     bl_options = {"REGISTER", "UNDO"}
@@ -873,13 +870,13 @@ class NAIL_OT_locked_transform_interactive(Operator):
         return True
 
     def execute(self, context):
-        if ( (NAIL_OT_locked_transform_interactive.active is not None) and
-             not NAIL_OT_locked_transform_interactive.active.cancelled ):
-            NAIL_OT_locked_transform_interactive.active.cancelled = True
+        if ( (AURYCAT_OT_nail_locked_transform_interactive.active is not None) and
+             not AURYCAT_OT_nail_locked_transform_interactive.active.cancelled ):
+            AURYCAT_OT_nail_locked_transform_interactive.active.cancelled = True
             self.report({'ERROR'}, "Interactive texture-locked transform operator already running, cancelling both")
             return {'CANCELLED'}
 
-        NAIL_OT_locked_transform_interactive.active = self
+        AURYCAT_OT_nail_locked_transform_interactive.active = self
         self.cancelled = False
         self.finished = False
         self.saved_operator = context.active_operator
@@ -891,7 +888,7 @@ class NAIL_OT_locked_transform_interactive(Operator):
         elif self.mode == 'scale':
             bpy.ops.transform.resize('INVOKE_DEFAULT')
         else:
-            self.report({'ERROR'}, f"Unrecognized mode {self.mode} for operator {NAIL_OT_locked_transform_interactive.bl_idname}")
+            self.report({'ERROR'}, f"Unrecognized mode {self.mode} for operator {AURYCAT_OT_nail_locked_transform_interactive.bl_idname}")
             return {'CANCELLED'}
 
         context.window_manager.modal_handler_add(self)
@@ -899,7 +896,7 @@ class NAIL_OT_locked_transform_interactive(Operator):
 
     def modal(self, context, event):
         if self.cancelled:
-            NAIL_OT_locked_transform_interactive.active = None
+            AURYCAT_OT_nail_locked_transform_interactive.active = None
             return {'CANCELLED'}
 
         # Cancel on the next frame
@@ -947,7 +944,7 @@ class NAIL_OT_locked_transform_interactive(Operator):
                 self.report({'ERROR'}, "Something went wrong when determining the transform operation")
                 return {'CANCELLED'}
 
-            NAIL_OT_locked_transform_interactive.active = None
+            AURYCAT_OT_nail_locked_transform_interactive.active = None
             self.finalize_transform(context, op, final_mode)
             return {'FINISHED'}
 
@@ -1045,7 +1042,7 @@ class SharedFinalizeInteractiveTexLockedTransform:
         else:
             return {'FINISHED'}
 
-    # Somehow the (very hacky) NAIL_OT_locked_transform_interactive operator that runs
+    # Somehow the (very hacky) AURYCAT_OT_nail_locked_transform_interactive operator that runs
     # right before this one causes Blender to not show the operator HUD/property popup
     # of this operator. Showing this operator as modal for one frame fixes it.
     modal_hack: bpy.props.BoolProperty(name="", default=False, options={'HIDDEN'})
@@ -1063,7 +1060,7 @@ class SharedFinalizeInteractiveTexLockedTransform:
         s.enabled = False
         s.prop(self, 'orient_type_enum')
 
-class NAIL_OT_locked_transform_interactive__translate(SharedFinalizeInteractiveTexLockedTransform, Operator):
+class AURYCAT_OT_nail_locked_transform_interactive__translate(SharedFinalizeInteractiveTexLockedTransform, Operator):
     bl_idname = "aurycat.nail_locked_transform_interactive__translate"
     bl_label = "Nail Texture-Locked Move"
     value: bpy.props.FloatVectorProperty(
@@ -1071,7 +1068,7 @@ class NAIL_OT_locked_transform_interactive__translate(SharedFinalizeInteractiveT
     def get_matrix(self):
         return Matrix.Translation(self.value)
 
-class NAIL_OT_locked_transform_interactive__rotate(SharedFinalizeInteractiveTexLockedTransform, Operator):
+class AURYCAT_OT_nail_locked_transform_interactive__rotate(SharedFinalizeInteractiveTexLockedTransform, Operator):
     bl_idname = "aurycat.nail_locked_transform_interactive__rotate"
     bl_label = "Nail Texture-Locked Rotate"
     orient_axis: bpy.props.EnumProperty(
@@ -1084,7 +1081,7 @@ class NAIL_OT_locked_transform_interactive__rotate(SharedFinalizeInteractiveTexL
         if self.orient_type == 'VIEW': v = -v
         return Matrix.Rotation(v, 4, self.orient_axis)
 
-class NAIL_OT_locked_transform_interactive__scale(SharedFinalizeInteractiveTexLockedTransform, Operator):
+class AURYCAT_OT_nail_locked_transform_interactive__scale(SharedFinalizeInteractiveTexLockedTransform, Operator):
     bl_idname = "aurycat.nail_locked_transform_interactive__scale"
     bl_label = "Nail Texture-Locked Scale"
     value: bpy.props.FloatVectorProperty(
