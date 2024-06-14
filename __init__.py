@@ -42,7 +42,7 @@ import bmesh
 import math
 import enum
 import traceback
-from bpy.types import Operator, Macro
+from bpy.types import Operator, Macro, AddonPreferences
 from bpy.app.handlers import persistent
 from mathutils import Euler, Vector, Matrix, Quaternion
 from operator import attrgetter
@@ -51,6 +51,10 @@ from operator import attrgetter
 #################
 ### Constants ###
 #################
+
+# __name__ is "__main__" and __package__ is None when running via Blender script editor
+RUNNING_AS_SCRIPT = (__name__ == "__main__")
+PACKAGE_NAME = (__package__ if __package__ is not None else "blender-nail")
 
 face_vec3_getter = attrgetter("faces.layers.float_vector")
 # float_color is the only vec4 attribute accessible by BMesh >:(
@@ -81,12 +85,10 @@ TCFLAG_ALIGN_LOCKED = 8   # True for manual alignment of UX axes. Cannot be comb
 
 TCFLAG_ALL = TCFLAG_ENABLED | TCFLAG_OBJECT_SPACE | TCFLAG_ALIGN_FACE | TCFLAG_ALIGN_LOCKED
 
-AUTO_APPLY_UPDATE_INTERVAL = 0.5
-
 def nail_classes():
     return [
         AURYCAT_OT_nail_unregister,
-        NailSettings,
+        NailPreferences,
         AURYCAT_OT_nail_sleep,
         AURYCAT_MT_nail_main_menu,
         AURYCAT_OT_nail_mark_nailface,
@@ -114,35 +116,49 @@ def nail_classes():
 
 draw_handler = None
 
-def main():
+def register():
+
     # Invoke unregister op on an existing "install" of the plugin before
     # re-registering. Lets you press the "Run Script" button without having
     # to maually unregister or run Blender > Reload Scripts first.
     if ('aurycat' in dir(bpy.ops)) and ('nail_unregister' in dir(bpy.ops.aurycat)):
-        bpy.ops.aurycat.nail_unregister()
-    register()
-    on_load_post()
+        if RUNNING_AS_SCRIPT:
+            # Running via "Run Script"
+            bpy.ops.aurycat.nail_unregister()
+        else:
+            # Running via real addon -- Blender doesn't let us invoke ops here.
+            # This shouldn't happen in normal addon usage, so just abort.
+            raise RuntimeError("Nail is already registered! Run bpy.ops.aurycat.nail_unregister() in the Python Console or restart Blender.")
 
-def register():
-    for cls in nail_classes():
-        bpy.utils.register_class(cls)
+    try:
+        for cls in nail_classes():
+            bpy.utils.register_class(cls)
 
-    AURYCAT_OT_nail_internal_modal_locked_transform.active = None
+        AURYCAT_OT_nail_internal_modal_locked_transform.active = None
 
-    bpy.types.WindowManager.nail_settings = bpy.props.PointerProperty(name='Nail Settings', type=NailSettings)
+        bpy.types.VIEW3D_PT_view3d_lock.append(draw_lock_rotation)
+        bpy.types.VIEW3D_MT_editor_menus.append(nail_draw_main_menu)
 
-    bpy.types.VIEW3D_PT_view3d_lock.append(draw_lock_rotation)
-    bpy.types.VIEW3D_MT_editor_menus.append(nail_draw_main_menu)
+        set_post_load_handler_enabled(True)
 
-    set_load_post_handler_enabled(True)
+        # This awakens Nail if any NailMeshes exist in the scene.
+        # See on_post_reigster() header comment for why this needs
+        # to be done via a handler.
+        set_post_register_handler_enabled(True)
+    except Exception as e:
+        unregister()
+        raise e
 
 def unregister():
-    no_except(lambda: set_load_post_handler_enabled(False))
+    global nail_is_awake
+    nail_is_awake = False
+    no_except(lambda: set_post_register_handler_enabled(False))
+    no_except(lambda: set_post_load_handler_enabled(False))
+    no_except(lambda: enable_post_depsgraph_update_handler(False))
     no_except(lambda: bpy.types.VIEW3D_PT_view3d_lock.remove(draw_lock_rotation))
     no_except(lambda: bpy.types.VIEW3D_MT_editor_menus.remove(nail_draw_main_menu))
-    # Set nail_settings to None before unregistering NailSceneSettings to avoid
-    # Blender crash (Use setattr since you can't use = assignment in a lambda)
-    no_except(lambda: setattr(bpy.types.WindowManager, 'nail_settings', None))
+    no_except(lambda: bpy.types.SpaceView3D.draw_handler_remove(draw_handler, 'WINDOW'), silent=True)
+    no_except(lambda: remove_keymaps())
     for cls in nail_classes():
         no_except(lambda: bpy.utils.unregister_class(cls))
 
@@ -160,23 +176,65 @@ class AURYCAT_OT_nail_unregister(Operator):
 ### Awake / Sleep ###
 #####################
 
-# Nail is "awake" when a blend file has been loaded that contains a NailMesh,
-# or when a NailMesh is created. When Nail is awake, keymaps and handler events
-# are registered. When asleep, they're unregistered. This reduces the chance
-# that Nail will cause performance issues or other bugs when it's not needed.
+# When Nail is "awake", the keybinds and depsgraph update handlers are registered.
+# Nail tries to be "asleep" when not needed to avoid causing trouble / performance
+# issues by running all the time when not necessary.
+#
+# Nail wakes up when a new blend file has been loaded that contains a NailMesh,
+# or when the addon is registered and the existing blend file contains a NailMesh,
+# or when a NailMesh is created (e.g. "Mark NailFace").
+#
+# Nail goes to sleep when the addon is unregistered (duh) or when a new blend file
+# is loaded that does not contain a NailMesh. It can also be put to sleep manually
+# with `bpy.ops.aurycat.nail_sleep()`.
 
 nail_is_awake = False
 
-def set_load_post_handler_enabled(enable):
-    set_handler_enabled(bpy.app.handlers.load_post, on_load_post, enable)
+def set_post_load_handler_enabled(enable):
+    set_handler_enabled(bpy.app.handlers.load_post, on_post_load, enable)
+
+def set_post_register_handler_enabled(enable):
+    set_handler_enabled(bpy.app.handlers.depsgraph_update_post, on_post_register, enable)
 
 @persistent
-def on_load_post():
+def on_post_load(path):
+    if any_nail_meshes():
+        nail_wake()
+    else:
+        nail_sleep()
+
+# This handler is used to detect right after the plug is registered, once bpy.data
+# is available, in order to check if Nail should be awake.
+#
+# While an addon is being Registered, bpy.context/bpy.data are set to dummy
+# 'Restricted' objects which don't contain any real information. At register, Nail
+# needs to check if it should become awake, and it needs to look at bpy.data.objects
+# to do that. So this handler is added to get the first depsgraph update after
+# registration. By the time any depsgraph update happens, bpy.data is sure to
+# be available. This handler then unregisters itself immediately.
+@persistent
+def on_post_register(scene, depsgraph):
+    # Immediately disable this handler, it just needs to run once after registering
+    set_post_register_handler_enabled(False)
+
+    print("post register", nail_is_awake)
+    if not nail_is_awake and any_nail_meshes():
+        print("nail meshes")
+        nail_wake()
+        # If this event woke up Nail, and auto_apply is enabled, pass the depsgraph update
+        # on to the standard depsgraph update handler so we don't miss any frames
+        if NailPreferences.get('auto_apply'):
+            on_post_depsgraph_update(scene, depsgraph)
+
+def any_nail_meshes():
     for obj in bpy.data.objects:
         if NailMesh.is_nail_object(obj):
-            nail_wake()
-            return
-    nail_sleep()
+            return True
+    return False
+
+def nail_wake_if_needed():
+    if not nail_is_awake and any_nail_meshes():
+        nail_wake()
 
 def nail_wake():
     global nail_is_awake, draw_handler
@@ -185,12 +243,12 @@ def nail_wake():
         return
 
     print("** Nail addon wake")
-
-    add_keymaps()
-    draw_handler = bpy.types.SpaceView3D.draw_handler_add(debug_draw_3dview, (), 'WINDOW', 'POST_VIEW')
-    auto_apply_updated(None, bpy.context)
-
     nail_is_awake = True
+
+    draw_handler = bpy.types.SpaceView3D.draw_handler_add(debug_draw_3dview, (), 'WINDOW', 'POST_VIEW')
+    auto_apply_updated(None, None)
+    update_rate_updated(None, None)
+    use_locked_transform_keymaps_updated(None, None)
 
 def nail_sleep():
     global nail_is_awake, draw_handler
@@ -198,13 +256,13 @@ def nail_sleep():
     if not nail_is_awake:
         return
 
+    print("** Nail addon sleep")
+    nail_is_awake = False
+
     no_except(lambda: enable_post_depsgraph_update_handler(False))
-    no_except(lambda: bpy.types.SpaceView3D.draw_handler_remove(draw_handler, 'WINDOW'))
+    no_except(lambda: bpy.types.SpaceView3D.draw_handler_remove(draw_handler, 'WINDOW'), silent=True)
     no_except(lambda: remove_keymaps())
 
-    print("** Nail addon sleep")
-
-    nail_is_awake = False
 
 class AURYCAT_OT_nail_sleep(Operator):
     bl_idname = "aurycat.nail_sleep"
@@ -258,20 +316,67 @@ def remove_keymaps():
 ### Settings ###
 ################
 
-def auto_apply_updated(_, context):
-    auto_apply = False
-    if 'nail_settings' in context.window_manager:
-        if 'auto_apply' in context.window_manager.nail_settings:
-            auto_apply = context.window_manager.nail_settings.auto_apply
-    enable_post_depsgraph_update_handler(auto_apply)
+def auto_apply_updated(self, context):
+    enable_post_depsgraph_update_handler(NailPreferences.get('auto_apply'))
 
-class NailSettings(bpy.types.PropertyGroup):
-    auto_apply: bpy.props.BoolProperty(name="Auto-Apply Transforms", default=False, update=auto_apply_updated,
-        description="Automatically applies the current transform as objects are transformed or meshes are updated. While in edit mode, only applies to selected faces or their adjacent faces, for efficiency")
-    fast_updates: bpy.props.BoolProperty(name="Fast Update Rate", default=False,
-        description="Makes Auto Apply update faster, potentially slowing down Blender while editing larger meshes")
-    wrap_uvs: bpy.props.BoolProperty(name="Wrap UVs", default=True,
-        description="If True, each face's UV island is wrapped to be near (0,0) in UV space. Otherwise, UVs are projected literally from world-space coordinates, meaning the UVs can be very far from (0,0) if the face is far from the world origin")
+def update_rate_updated(self, context):
+    on_post_depsgraph_update.update_interval = NailPreferences.get('update_rate')
+
+def use_locked_transform_keymaps_updated(self, context):
+    if NailPreferences.get('use_locked_transform_keymaps') and nail_is_awake:
+        add_keymaps()
+    else:
+        no_except(lambda: remove_keymaps())
+
+class NailPreferences(AddonPreferences):
+    bl_idname = PACKAGE_NAME
+
+    auto_apply: bpy.props.BoolProperty(
+        name="Auto-Apply Transforms",
+        description="If checked, automatically applies the current transform as objects are transformed or meshes are updated. While in edit mode, only applies to selected faces or their adjacent faces, for efficiency",
+        default=True,
+        update=auto_apply_updated)
+    update_rate: bpy.props.FloatProperty(
+        name="Update Rate",
+        description="How fast to auto-apply. Usually fine to leave at 0 seconds (Immediate), but for very large meshes or slower computers, it may be helpful to specify a slower update rate",
+        subtype='TIME_ABSOLUTE',
+        default=0, min=0, max=2,
+        update=update_rate_updated)
+    wrap_uvs: bpy.props.BoolProperty(
+        name="Wrap UVs",
+        description="If checked, each face's UV island is wrapped to be near (0,0) in UV space. Otherwise, UVs are projected literally from world-space coordinates, meaning the UVs can be very far from (0,0) if the face is far from the world origin",
+        default=True)
+    use_locked_transform_keymaps: bpy.props.BoolProperty(
+        name="Use Locked-Transform Keymaps",
+        description="If checked, Nail automatically replaces the G (grab/move) and R (rotate) edit-mode keymaps with Nail's locked-transform variants when a project containing a NailMesh is opened. These operators behave like normal G and R for non-NailMeshes. If unchecked, you can still access the locked-transform operators via the Nail menu",
+        default=True,
+        update=use_locked_transform_keymaps_updated)
+
+    @classmethod
+    def get(cls, name):
+        try:
+            return bpy.context.preferences.addons[PACKAGE_NAME].preferences[name]
+        except:
+            # Try to get the default value of the property
+            return cls.__annotations__[name].keywords['default']
+
+    def draw(self, context):
+        layout = self.layout
+        auto_apply = NailPreferences.get('auto_apply')
+        update_rate = NailPreferences.get('update_rate')
+
+        layout.use_property_split = False
+        layout.use_property_decorate = False
+
+        sp = layout.split()
+        sp.prop(self, 'auto_apply')
+        sp2 = sp.split()
+        sp2.enabled = auto_apply
+        nam = "Update Rate" + ("    (Immediate)" if update_rate == 0 and auto_apply else "")
+        sp2.prop(self, 'update_rate', text=nam)
+
+        layout.prop(self, 'wrap_uvs')
+        layout.prop(self, 'use_locked_transform_keymaps')
 
 
 ############
@@ -314,15 +419,10 @@ class AURYCAT_MT_nail_main_menu(bpy.types.Menu):
         layout.operator(AURYCAT_OT_nail_locked_transform.bl_idname, text="Texture-Locked Transform (Noninteractive)")
 
         layout.separator()
-        layout.label(text="Auto-Apply", icon='PROP_ON')
-
-        layout.prop(bpy.context.window_manager.nail_settings, 'auto_apply')
-        s = layout.split()
-        s.prop(bpy.context.window_manager.nail_settings, 'fast_updates')
-        s.enabled = bpy.context.window_manager.nail_settings.auto_apply
-
-#        layout.separator()
-#        layout.operator(AURYCAT_OT_nail_unregister.bl_idname)
+        layout.operator("preferences.addon_show", text="Preferences")
+        # When running from Blender script editor show unregister button for convenience
+        if RUNNING_AS_SCRIPT:
+            layout.operator(AURYCAT_OT_nail_unregister.bl_idname)
 
         # As a saftey check to make sure this hacky modal operator can't get
         # too off the rails! If somehow our menu is opened, surely the operator
@@ -352,8 +452,8 @@ def on_post_depsgraph_update(scene, depsgraph):
     if AURYCAT_OT_nail_internal_modal_locked_transform.active is not None:
         return
 
-    # When fast is set, do the apply every depsgraph update
-    if bpy.context.window_manager.nail_settings.fast_updates:
+    # For ~0 update_interval, do the apply every depsgraph update
+    if self.update_interval < 0.04:
         for u in depsgraph.updates:
             if depsgraph_update_is_applicable(u):
                 do_auto_apply(u.id)
@@ -392,8 +492,9 @@ def on_post_depsgraph_update(scene, depsgraph):
             # unregisters, this will register it again (if the modal operation is
             # still ongoing).
             if not bpy.app.timers.is_registered(geom_update_timer):
-                bpy.app.timers.register(geom_update_timer, first_interval=AUTO_APPLY_UPDATE_INTERVAL)
+                bpy.app.timers.register(geom_update_timer, first_interval=self.update_interval)
 
+on_post_depsgraph_update.update_interval = 0
 on_post_depsgraph_update.last_operator = None
 on_post_depsgraph_update.last_obj_list = []
 on_post_depsgraph_update.timer_ran = False
@@ -620,6 +721,7 @@ class AURYCAT_OT_nail_mark_nailface(Operator):
         tc.flags_set |= TCFLAG_ENABLED
         tc.flags |= TCFLAG_ENABLED
         set_or_apply_selected_faces(tc, context, set=True, apply=True)
+        nail_wake_if_needed()
         return {'FINISHED'}
 
 
@@ -806,10 +908,7 @@ def keybind_poll(context):
     if not shared_poll(None, context, only_face_select=True):
         return False
     # Check for at least one NailMesh object in edit mode
-    for obj in context.objects_in_mode:
-        if NailMesh.is_nail_object(obj):
-            return True
-    return False
+    return any_nail_meshes()
 
 # Use this for keybinds.
 # It acts like regular translate when Nail Locked Translate is not applicable
@@ -1042,7 +1141,7 @@ class SharedFinalizeInteractiveTexLockedTransform:
         mat = iorient @ self.get_matrix() @ orient
 
         for obj in context.objects_in_mode:
-            if obj.type == 'MESH':
+            if NailMesh.is_nail_object(obj):
                 with NailMesh(obj) as nm:
                     nm.locked_transform(mat)
 
@@ -1236,12 +1335,13 @@ def set_handler_enabled(handler_list, func, enable):
         if func in handler_list:
             handler_list.remove(func)
 
-def no_except(func):
+def no_except(func, silent=False):
     try:
         func()
     except Exception as e:
-        print("Error in Nail addon:")
-        print(traceback.format_exc())
+        if not silent:
+            print("Error in Nail addon:")
+            print(traceback.format_exc())
 
 
 ############
@@ -1324,7 +1424,7 @@ class NailMesh:
     def __enter__(self):
         self.matrix_world = self.obj.matrix_world
         self.rot_world = self.matrix_world.to_quaternion()
-        self.wrap_uvs = bpy.context.window_manager.nail_settings.wrap_uvs
+        self.wrap_uvs = NailPreferences.get('wrap_uvs')
         self.me = self.obj.data
         if self.me.is_editmode:
             self.bm = bmesh.from_edit_mesh(self.me)
@@ -1350,9 +1450,7 @@ class NailMesh:
         self.bm = None
         self.me = None
 
-    def init_attrs(self):        
-        nail_wake()
-
+    def init_attrs(self):
         if len(self.bm.loops.layers.uv) == 0:
             self.bm.loops.layers.uv.new("UVMap")
         elif self.bm.loops.layers.uv.active is None:
@@ -1454,8 +1552,6 @@ class NailMesh:
         return True
 
     def apply_texture(self, auto_apply=False, editmode_only_selected=True):
-        if AURYCAT_OT_nail_internal_modal_locked_transform.active is not None:
-            print("aaaaaaaa")
         apply_mode = 0 # All faces
         if self.me.is_editmode and editmode_only_selected:
             if auto_apply:
@@ -1856,6 +1952,5 @@ def debug_draw_3dview():
     did_draw = True
 
 
-if __name__ == "__main__":
-    main()
-
+if RUNNING_AS_SCRIPT:
+    register()
