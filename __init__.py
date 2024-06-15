@@ -1474,6 +1474,9 @@ def no_except(func, silent=False):
 ############################   Main Behavior   ################################
 ###############################################################################
 
+# This class is not for storage of a face's texture config, it's just an
+# intermediate representation between NailMesh and the operators to make
+# coding the operators simpler
 class TextureConfig:
     def __init__(tc):
         # The default None value means that the value is "unset", which is important
@@ -1484,6 +1487,8 @@ class TextureConfig:
         tc.rotation = None
         tc.flags = 0
         tc.flags_set = 0  # flags_set is a 2nd bitmask to indicate which flags have a valid/set value
+        tc.uaxis = None
+        tc.vaxis = None
 
         # Set True when this TextureConfig represents the common values of multiple
         # faces, from NailMesh.get_texture_config. In that case, None values or
@@ -1634,6 +1639,10 @@ class NailMesh:
             scale_rot_attr.xy = tc.scale
         if tc.rotation is not None:
             scale_rot_attr.z = tc.rotation
+        if tc.uaxis is not None:
+            face[self.lock_uaxis_layer] = tc.uaxis
+        if tc.vaxis is not None:
+            face[self.lock_vaxis_layer] = tc.vaxis
 
     # tc is an in-out parameter
     # Pass in a blank TextureConfig to start with, multiple objects can
@@ -1655,11 +1664,13 @@ class NailMesh:
             return False
 
         if tc.multiple_faces:
-            # Find all the bits that are different between tc.flags and flags
+            # Find all the bits that are different between tc.flags and this face's flags
             flag_diff = tc.flags ^ f.flags
+            # and mark them unset
             tc.flags &= ~flag_diff
             tc.flags_set &= ~flag_diff
 
+            # Unset any differing values between tc and this face
             if tc.shift is not None:
                 if tc.shift != f.shift:
                     tc.shift = None
@@ -1669,12 +1680,20 @@ class NailMesh:
             if tc.rotation is not None:
                 if tc.rotation != f.rotation:
                     tc.rotation = None
+            if tc.uaxis is not None:
+                if tc.uaxis != f.lock_uaxis_attr:
+                    tc.uaxis = None
+            if tc.vaxis is not None:
+                if tc.vaxis != f.lock_vaxis_attr:
+                    tc.vaxis = None
         else:
             tc.flags = f.flags
             tc.flags_set = TCFLAG_ALL
             tc.shift = f.shift
             tc.scale = f.scale
             tc.rotation = f.rotation
+            tc.uaxis = f.lock_uaxis_attr
+            tc.vaxis = f.lock_vaxis_attr
 
         return True
 
