@@ -48,9 +48,9 @@ from mathutils import Euler, Vector, Matrix, Quaternion
 from operator import attrgetter
 
 
-#################
-### Constants ###
-#################
+###############################################################################
+#################################  Constants  #################################
+###############################################################################
 
 # __name__ is "__main__" and __package__ is None when running via Blender script editor
 RUNNING_AS_SCRIPT = (__name__ == "__main__")
@@ -91,6 +91,7 @@ def nail_classes():
         NailPreferences,
         AURYCAT_OT_nail_sleep,
         AURYCAT_MT_nail_main_menu,
+        # Operators
         AURYCAT_OT_nail_mark_nailface,
         AURYCAT_OT_nail_clear_nailface,
         AURYCAT_OT_nail_edit_tex_transform,
@@ -98,6 +99,7 @@ def nail_classes():
         AURYCAT_OT_nail_apply_tex_transform,
         AURYCAT_OT_nail_copy_active_to_selected,
         AURYCAT_OT_nail_locked_transform,
+        # Interactive Texture-locked Transform Operators
         AURYCAT_OT_nail_modal_locked_translate,
         AURYCAT_OT_nail_modal_locked_rotate,
         AURYCAT_OT_nail_modal_locked_scale,
@@ -110,9 +112,9 @@ def nail_classes():
     ]
 
 
-#############################
-### Register / Unregister ###
-#############################
+###############################################################################
+###########################  Register / Unregister  ###########################
+###############################################################################
 
 draw_handler = None
 
@@ -149,6 +151,7 @@ def register():
         unregister()
         raise e
 
+
 def unregister():
     global nail_is_awake
     nail_is_awake = False
@@ -162,6 +165,7 @@ def unregister():
     for cls in nail_classes():
         no_except(lambda: bpy.utils.unregister_class(cls))
 
+
 class AURYCAT_OT_nail_unregister(Operator):
     bl_idname = "aurycat.nail_unregister"
     bl_label = "Unregister"
@@ -172,9 +176,9 @@ class AURYCAT_OT_nail_unregister(Operator):
         return {'FINISHED'}
 
 
-#####################
-### Awake / Sleep ###
-#####################
+###############################################################################
+###############################  Awake / Sleep  ###############################
+###############################################################################
 
 # When Nail is "awake", the keybinds and depsgraph update handlers are registered.
 # Nail tries to be "asleep" when not needed to avoid causing trouble / performance
@@ -193,8 +197,10 @@ nail_is_awake = False
 def set_post_load_handler_enabled(enable):
     set_handler_enabled(bpy.app.handlers.load_post, on_post_load, enable)
 
+
 def set_post_register_handler_enabled(enable):
     set_handler_enabled(bpy.app.handlers.depsgraph_update_post, on_post_register, enable)
+
 
 @persistent
 def on_post_load(path):
@@ -202,6 +208,7 @@ def on_post_load(path):
         nail_wake()
     else:
         nail_sleep()
+
 
 # This handler is used to detect right after the plug is registered, once bpy.data
 # is available, in order to check if Nail should be awake.
@@ -217,14 +224,13 @@ def on_post_register(scene, depsgraph):
     # Immediately disable this handler, it just needs to run once after registering
     set_post_register_handler_enabled(False)
 
-    print("post register", nail_is_awake)
     if not nail_is_awake and any_nail_meshes():
-        print("nail meshes")
         nail_wake()
         # If this event woke up Nail, and auto_apply is enabled, pass the depsgraph update
         # on to the standard depsgraph update handler so we don't miss any frames
         if NailPreferences.get('auto_apply'):
             on_post_depsgraph_update(scene, depsgraph)
+
 
 def any_nail_meshes():
     for obj in bpy.data.objects:
@@ -232,9 +238,11 @@ def any_nail_meshes():
             return True
     return False
 
+
 def nail_wake_if_needed():
     if not nail_is_awake and any_nail_meshes():
         nail_wake()
+
 
 def nail_wake():
     global nail_is_awake, draw_handler
@@ -249,6 +257,7 @@ def nail_wake():
     auto_apply_updated(None, None)
     update_rate_updated(None, None)
     use_locked_transform_keymaps_updated(None, None)
+
 
 def nail_sleep():
     global nail_is_awake, draw_handler
@@ -267,26 +276,23 @@ def nail_sleep():
 class AURYCAT_OT_nail_sleep(Operator):
     bl_idname = "aurycat.nail_sleep"
     bl_label = "Nail Sleep"
-    bl_description = \
-"Manually put Nail addon to sleep (unregister handlers and keybinds). " + \
-"This is done automatically when loading a new file which does not " + \
-"contain NailMesh objects. Nail can be awoken by loading a file with " + \
-"NailMesh objects, or by using Mark NailFace"
+    bl_description = "Manually put Nail addon to sleep (unregister handlers and keybinds). This is done automatically when loading a new file which does not contain NailMesh objects. Nail can be awoken by loading a file with NailMesh objects, or by using Mark NailFace"
     bl_options = {"REGISTER"}
     def execute(self, context):
         nail_sleep()
         return {'FINISHED'}
 
 
-###############
-### Keymaps ###
-###############
+###############################################################################
+##################################  Keymaps  ##################################
+###############################################################################
 
 def keymapped_ops():
     return [
         {'idname': AURYCAT_OT_nail_keybind_modal_locked_translate.bl_idname, 'type': 'G', 'value': 'PRESS'},
         {'idname': AURYCAT_OT_nail_keybind_modal_locked_rotate.bl_idname, 'type': 'R', 'value': 'PRESS'},
     ]
+
 
 def add_keymaps():
     remove_keymaps()
@@ -297,6 +303,7 @@ def add_keymaps():
         km = kc.keymaps.new(name='Mesh', space_type='EMPTY')
         for op in keymapped_ops():
             km.keymap_items.new(**op)
+
 
 def remove_keymaps():
     wm = bpy.context.window_manager
@@ -312,21 +319,24 @@ def remove_keymaps():
             km.keymap_items.remove(kmi)
 
 
-################
-### Settings ###
-################
+###############################################################################
+################################  Preferences  ################################
+###############################################################################
 
 def auto_apply_updated(self, context):
-    enable_post_depsgraph_update_handler(NailPreferences.get('auto_apply'))
+    enable_post_depsgraph_update_handler(nail_is_awake and NailPreferences.get('auto_apply'))
+
 
 def update_rate_updated(self, context):
     on_post_depsgraph_update.update_interval = NailPreferences.get('update_rate')
 
+
 def use_locked_transform_keymaps_updated(self, context):
-    if NailPreferences.get('use_locked_transform_keymaps') and nail_is_awake:
+    if nail_is_awake and NailPreferences.get('use_locked_transform_keymaps'):
         add_keymaps()
     else:
         no_except(lambda: remove_keymaps())
+
 
 class NailPreferences(AddonPreferences):
     bl_idname = PACKAGE_NAME
@@ -336,16 +346,19 @@ class NailPreferences(AddonPreferences):
         description="If checked, automatically applies the current transform as objects are transformed or meshes are updated. While in edit mode, only applies to selected faces or their adjacent faces, for efficiency",
         default=True,
         update=auto_apply_updated)
+
     update_rate: bpy.props.FloatProperty(
         name="Update Rate",
         description="How fast to auto-apply. Usually fine to leave at 0 seconds (Immediate), but for very large meshes or slower computers, it may be helpful to specify a slower update rate",
         subtype='TIME_ABSOLUTE',
         default=0, min=0, max=2,
         update=update_rate_updated)
+
     wrap_uvs: bpy.props.BoolProperty(
         name="Wrap UVs",
         description="If checked, each face's UV island is wrapped to be near (0,0) in UV space. Otherwise, UVs are projected literally from world-space coordinates, meaning the UVs can be very far from (0,0) if the face is far from the world origin",
         default=True)
+
     use_locked_transform_keymaps: bpy.props.BoolProperty(
         name="Use Locked-Transform Keymaps",
         description="If checked, Nail automatically replaces the G (grab/move) and R (rotate) edit-mode keymaps with Nail's locked-transform variants when a project containing a NailMesh is opened. These operators behave like normal G and R for non-NailMeshes. If unchecked, you can still access the locked-transform operators via the Nail menu",
@@ -379,19 +392,21 @@ class NailPreferences(AddonPreferences):
         layout.prop(self, 'use_locked_transform_keymaps')
 
 
-############
-### Menu ###
-############
+###############################################################################
+###################################  Menu  ####################################
+###############################################################################
 
 def nail_draw_main_menu(self, context):
     if context.mode == 'EDIT_MESH':
         self.layout.menu(AURYCAT_MT_nail_main_menu.bl_idname)
+
 
 def draw_lock_rotation(self, context):
     layout = self.layout
     view = context.space_data
     col = layout.column(align=True)
     col.prop(view.region_3d, "lock_rotation", text="Lock View Rotation")
+
 
 class AURYCAT_MT_nail_main_menu(bpy.types.Menu):
     bl_idname = "AURYCAT_MT_nail_main_menu"
@@ -431,12 +446,13 @@ class AURYCAT_MT_nail_main_menu(bpy.types.Menu):
             AURYCAT_OT_nail_internal_modal_locked_transform.active.cancelled = True
 
 
-##########################
-### Auto-apply handler ###
-##########################
+###############################################################################
+############################  Auto-apply handler  #############################
+###############################################################################
 
 def enable_post_depsgraph_update_handler(enable):
     set_handler_enabled(bpy.app.handlers.depsgraph_update_post, on_post_depsgraph_update, enable)
+
 
 # https://blender.stackexchange.com/a/283286/154191
 @persistent
@@ -494,6 +510,7 @@ def on_post_depsgraph_update(scene, depsgraph):
             if not bpy.app.timers.is_registered(geom_update_timer):
                 bpy.app.timers.register(geom_update_timer, first_interval=self.update_interval)
 
+
 on_post_depsgraph_update.update_interval = 0
 on_post_depsgraph_update.last_operator = None
 on_post_depsgraph_update.last_obj_list = []
@@ -508,20 +525,22 @@ def depsgraph_update_is_applicable(u):
         return False
     return True
 
+
 def geom_update_timer():
     on_post_depsgraph_update.timer_ran = True
     for obj in on_post_depsgraph_update.last_obj_list:
         do_auto_apply(obj)
     return None
 
+
 def do_auto_apply(obj):
     with NailMesh(obj) as nm:
         nm.apply_texture(auto_apply=True)
 
 
-#################
-### Operators ###
-#################
+###############################################################################
+#################################  Operators  #################################
+###############################################################################
 
 def shared_poll(cls, context, only_face_select=False):
     if context.mode != 'EDIT_MESH':
@@ -742,41 +761,6 @@ class AURYCAT_OT_nail_clear_nailface(Operator):
         return {'FINISHED'}
 
 
-class AURYCAT_OT_nail_mark_axislock(Operator):
-    bl_idname = "aurycat.nail_mark_axislock"
-    bl_label = "Mark Axis Lock"
-    bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Locks the current transform axis on the selected NailFaces; 'face' or 'axis' alignment will stop affecting these faces until unlocked"
-
-    @classmethod
-    def poll(cls, context):
-        return shared_poll(cls, context)
-
-    def execute(self, context):
-        for obj in context.objects_in_mode:
-            if obj.type == 'MESH':
-                with NailMesh(obj) as nm:
-                    nm.lock()
-        return {'FINISHED'}
-
-
-class AURYCAT_OT_nail_clear_axislock(Operator):
-    bl_idname = "aurycat.nail_clear_axislock"
-    bl_label = "Clear Axis Lock"
-    bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Clears axis lock on the selected NailFaces"
-
-    @classmethod
-    def poll(cls, context):
-        return shared_poll(cls, context)
-
-    def execute(self, context):
-        for obj in context.objects_in_mode:
-            if obj.type == 'MESH':
-                with NailMesh(obj) as nm:
-                    nm.unlock()
-        return {'FINISHED'}
-
 class AURYCAT_OT_nail_copy_active_to_selected(Operator):
     bl_idname = "aurycat.nail_copy_active_to_selected"
     bl_label = "Copy Active to Selected"
@@ -794,9 +778,9 @@ class AURYCAT_OT_nail_copy_active_to_selected(Operator):
             return {'CANCELLED'}
 
         tc.flags_set &= ~TCFLAG_ENABLED
-#        tc.flags_set &= ~TCFLAG_LOCK_AXIS
         set_or_apply_selected_faces(tc, context, set=True, apply=True)
         return {'FINISHED'}
+
 
 class AURYCAT_OT_nail_locked_transform(Operator):
     bl_idname = "aurycat.nail_locked_transform"
@@ -858,11 +842,12 @@ class AURYCAT_OT_nail_locked_transform(Operator):
         return {'FINISHED'}
 
 
-######################################################
-### Interactive Texture-locked Transform Operators ###
-######################################################
+###############################################################################
+#############   Interactive Texture-locked Transform Operators   ##############
+###############################################################################
 
-### User-facing operators for menus ###
+#------------------------------------------------------------------------------
+# User-facing operators for menus
 
 class AURYCAT_OT_nail_modal_locked_translate(Operator):
     bl_idname = "aurycat.nail_modal_locked_translate"
@@ -876,6 +861,7 @@ class AURYCAT_OT_nail_modal_locked_translate(Operator):
         AURYCAT_OT_nail_internal_modal_locked_transform.getop()('INVOKE_DEFAULT', mode='move')
         return {'FINISHED'}
 
+
 class AURYCAT_OT_nail_modal_locked_rotate(Operator):
     bl_idname = "aurycat.nail_modal_locked_rotate"
     bl_label = "Texture-Locked Rotate"
@@ -887,6 +873,7 @@ class AURYCAT_OT_nail_modal_locked_rotate(Operator):
     def execute(self, context):
         AURYCAT_OT_nail_internal_modal_locked_transform.getop()('INVOKE_DEFAULT', mode='rotate')
         return {'FINISHED'}
+
 
 class AURYCAT_OT_nail_modal_locked_scale(Operator):
     bl_idname = "aurycat.nail_modal_locked_scale"
@@ -901,7 +888,8 @@ class AURYCAT_OT_nail_modal_locked_scale(Operator):
         return {'FINISHED'}
 
 
-### Optional user-facing operators for keybinds ###
+#------------------------------------------------------------------------------
+# Optional user-facing operators for keybinds
 # (No 'keybind' version for locked-scale, since it's not common to want that)
 
 def keybind_poll(context):
@@ -909,6 +897,7 @@ def keybind_poll(context):
         return False
     # Check for at least one NailMesh object in edit mode
     return any_nail_meshes()
+
 
 # Use this for keybinds.
 # It acts like regular translate when Nail Locked Translate is not applicable
@@ -922,6 +911,7 @@ class AURYCAT_OT_nail_keybind_modal_locked_translate(Operator):
         else:
             AURYCAT_OT_nail_internal_modal_locked_transform.getop()('INVOKE_DEFAULT', mode='move')
         return {'FINISHED'}
+
 
 # Use this for keybinds.
 # It acts like regular rotate when Nail Locked Translate is not applicable
@@ -937,7 +927,8 @@ class AURYCAT_OT_nail_keybind_modal_locked_rotate(Operator):
         return {'FINISHED'}
 
 
-### Internal operators, should only be invoked via the user-facing ones ###
+#------------------------------------------------------------------------------
+# Internal operators, should only be invoked via the user-facing ones
 
 # This is such a hack, I bet it won't work for long. Developed on Blender 4.1.1.
 # The issue is that making an interactive move/rotate/scale as good as Blender's
@@ -1105,6 +1096,7 @@ class AURYCAT_OT_nail_internal_modal_locked_transform(Operator):
         # Run part2 asynchronously (i.e. after a very small delay) so that this operator can finish first
         bpy.app.timers.register(do_async, first_interval=0)
 
+
 # Operator logic shared across the transform, rotate, and scale finializing operators
 class SharedFinalizeInteractiveTexLockedTransform:
     bl_options = {"REGISTER", "UNDO"}
@@ -1170,6 +1162,7 @@ class SharedFinalizeInteractiveTexLockedTransform:
         s.enabled = False
         s.prop(self, 'orient_type_enum')
 
+
 class AURYCAT_OT_nail_internal_end_locked_translate(SharedFinalizeInteractiveTexLockedTransform, Operator):
     bl_idname = "aurycat.nail_internal_end_locked_translate"
     bl_label = "Nail Texture-Locked Move"
@@ -1177,6 +1170,7 @@ class AURYCAT_OT_nail_internal_end_locked_translate(SharedFinalizeInteractiveTex
         name="Move", default=[0]*3, subtype='TRANSLATION')
     def get_matrix(self):
         return Matrix.Translation(self.value)
+
 
 class AURYCAT_OT_nail_internal_end_locked_rotate(SharedFinalizeInteractiveTexLockedTransform, Operator):
     bl_idname = "aurycat.nail_internal_end_locked_rotate"
@@ -1191,6 +1185,7 @@ class AURYCAT_OT_nail_internal_end_locked_rotate(SharedFinalizeInteractiveTexLoc
         if self.orient_type == 'VIEW': v = -v
         return Matrix.Rotation(v, 4, self.orient_axis)
 
+
 class AURYCAT_OT_nail_internal_end_locked_scale(SharedFinalizeInteractiveTexLockedTransform, Operator):
     bl_idname = "aurycat.nail_internal_end_locked_scale"
     bl_label = "Nail Texture-Locked Scale"
@@ -1200,9 +1195,9 @@ class AURYCAT_OT_nail_internal_end_locked_scale(SharedFinalizeInteractiveTexLock
         return Matrix.Diagonal(self.value[:] + (1,))
 
 
-#############
-### Utils ###
-#############
+###############################################################################
+#################################   Utils   ###################################
+###############################################################################
 
 ORIENTATION_PX = 0  # +X
 ORIENTATION_PY = 1  # +Y
@@ -1344,12 +1339,11 @@ def no_except(func, silent=False):
             print(traceback.format_exc())
 
 
-############
-### Main ###
-############
+###############################################################################
+############################   Main Behavior   ################################
+###############################################################################
 
 class TextureConfig:
-
     def __init__(tc):
         # The default None value means that the value is "unset", which is important
         # when taking input values from a user. Unset values are left unchanged on the
@@ -1409,10 +1403,8 @@ class TextureConfig:
         fs = repr_flags(self.flags_set)
         return f"<TextureConfig, f:{f}, fs:{fs}, sh:{self.shift}, sc:{self.scale}, ro:{self.rotation}, mf:{self.multiple_faces}>"
 
-tan_len, bitan_len, fiiiirst, M1 = 0, 0, False, None
 
 class NailMesh:
-
     def __init__(self, obj, readonly=False):
         if obj.type != 'MESH':
             raise RuntimeError("Invalid object type used to initialize NailMesh: " + str(obj))
@@ -1588,14 +1580,8 @@ class NailMesh:
 
         uaxis, vaxis = self.get_face_uv_axes(face, f)
 
-#        center = face.calc_center_median()
-#        draw_vec(center, uaxis, (1,0,0))
-#        draw_vec(center, vaxis, (0,1,0))
-
         rotation_mat = Matrix.Rotation(f.rotation, 2)
         uv_layer = self.uv_layer
-
-#        self.generate_face_axes(face, f)
 
         for loop in face.loops:
             vert_coord = loop.vert.co
@@ -1615,30 +1601,6 @@ class NailMesh:
             diff_coord0 = wrapped_coord0 - coord0
             for loop in face.loops:
                 loop[uv_layer].uv += diff_coord0
-
-#    def lock(self, only_selected=True):
-#        only_selected = self.me.is_editmode and only_selected
-#        for face in self.bm.faces:
-#            if only_selected and not face.select:
-#                continue
-#        self.lock_face(face)
-
-#    def unlock(self, only_selected=True):
-#        only_selected = self.me.is_editmode and only_selected
-#        for face in self.bm.faces:
-#            if only_selected and not face.select:
-#                continue
-#            self.unlock_face(face)
-
-#    def lock_face(self, face):
-#        f = self.unpack_face_data(face)
-#        if f is None or f.lock_axis:
-#            return
-
-#    def unlock_face(self, face):
-#        f = self.unpack_face_data(face)
-#        if f is None or f.lock_axis:
-#            return
 
     def locked_transform(self, mat, only_selected=True):
         only_selected = self.me.is_editmode and only_selected
@@ -1662,82 +1624,7 @@ class NailMesh:
             self.locked_transform_one_face(face, mat)
             verts.update(face.verts)
 
-#        space = Matrix()#Matrix.Translation(-faces[0].calc_center_median())
         bmesh.ops.transform(self.bm, matrix=mat, verts=list(verts))
-
-#    def generate_face_axes(self, face, f):
-#        global tan_len, bitan_len, fiiiirst, M1
-#        center = face.calc_center_median()
-#        vert0 = face.verts[0].co
-#        vert1 = face.verts[1].co
-#        normal = face.normal
-#        if f.world_space:
-#            normal = self.rot_world @ normal
-#            center = self.matrix_world @ center
-#            vert0 = self.matrix_world @ vert0
-#            vert1 = self.matrix_world @ vert1
-#        tangent = vert0 - center
-#        tangent2 = vert1 - center
-#        bitangent = normal.cross(tangent.normalized())
-##        draw_vec(center, normal, (0,0,1))
-##        draw_vec(center, tangent, (0,1,0))
-##        draw_vec(center, tangent2, (0,1,0))
-##        draw_vec(center, bitangent, (0,0,1))
-#        bitangent = tangent2.project(bitangent)
-##        draw_vec(center, bitangent, (1,0,0))
-
-#        M2 = Matrix([(tangent.x,tangent.y,tangent.z,0),
-#                     (bitangent.x,bitangent.y,bitangent.z,0),
-#                     (normal.x,normal.y,normal.z,0),
-#                     (0,0,0,1)])
-
-#        if not fiiiirst:
-#            tan_len = tangent.length
-#            bitan_len = bitangent.length
-#            fiiiirst = True
-#            M1 = M2
-#        else:
-#            M_diff = M1.inverted() @ M2
-#            M_diff.invert()
-##            print(M_diff)
-#            #print(tangent.length/tan_len, " --- ", bitangent.length/bitan_len)
-
-#            up = Vector((0,0,1))
-#            left = Vector((1,0,0))
-#            forward = Vector((0,1,0))
-#            up = M_diff @ up
-#            left = M_diff @ left
-#            forward = M_diff @ forward
-#            origin = Vector((0,0,0))
-#            draw_vec(origin, up, (0,0,1))
-#            draw_vec(origin, left, (1,0,0))
-#            draw_vec(origin, forward, (0,1,0))
-
-
-
-        # get center, vert0, vert1, normal
-        # tangent = vert0-center
-        # tangent2 = vert1-center
-        # bitangent = normal.cross(tangent.normalized())
-        # bitangent scaled by the projection of tangent2 onto bitangent
-        # make a transformation matrix M1
-        #   n0 n1 n2 0    # or something like this idk
-        #   t0 t1 t2 0
-        #   b0 b1 b2 0
-        #   0  0  0  1
-        # repeat that process for the end, get M2
-        # M2 = M? @ M1
-        # M2 @ M1-1 = M? @ M1 @ M1-1
-        # M2 @ M1-1 = M?
-
-#        M2 = M? @ M1
-#        M2 @ M1^-1 = M? @ M1 @ M1^-1
-#        M2 @ M1^-1 = M? @ (M1 @ M1^-1)
-#        M2 @ M1^-1 = M?
-        
-
-        # M? = M1^-1 @ M2
-        # M? = M2^-1 @ M1
 
     def locked_transform_one_face(self, face, mat):
         f = self.unpack_face_data(face)
@@ -1770,52 +1657,6 @@ class NailMesh:
         flags = flag_set(flags, TCFLAG_ALIGN_LOCKED)
         flags = flag_clear(flags, TCFLAG_ALIGN_FACE)
         f.shift_flags_attr.z = flags
-#        f.transform_attr = rot_mat @ f.transform_attr
-#        row = f.transform_attr.row
-#        face[self.transform_r1_layer] = row[0]
-#        face[self.transform_r2_layer] = row[1]
-#        face[self.transform_r3_layer] = row[2]
-
-#        self.face_offset_texture(face, f, moveDelta, uaxis, vaxis)
-
-#        f.axis_rot_attr.xyzw = rotateAngles[:]
-##        return
-
-#        bIsLocking = True
-#        bIsMoving = moveDelta.length_squared > 0.00001
-
-#        normal = face.normal
-#        normal = f.transform_attr.to_quaternion() @ normal
-#        if f.world_space:
-#            normal = self.rot_world @ normal
-
-#        uaxis, vaxis = self.calc_uvaxes(Vector((0,0,1)), False)
-#        tq = f.transform_attr.to_quaternion()
-#        uaxis = tq @ uaxis
-#        vaxis = tq @ vaxis
-
-#        uaxis, vaxis = self.calc_uvaxes(normal, f.align_face)
-
-##        if mat.is_identity:
-#        print(f.shift_flags_attr.xy)
-#            return
-
-#        fscaleU = uaxis.length
-#        fscaleV = vaxis.length
-#        if isclose(fscaleU, 0): fscaleU = 1
-#        if isclose(fscaleV, 0): fscaleV = 1
-
-#        vU = mat @ uaxis
-#        vV = mat @ vaxis
-
-#        bUVAxisSameScale = isclose(fscaleU, 1) and isclose(fscaleV, 1)
-#        bUVAxisPerpendicular = math.isclose(vU.dot(vV), 0, abs_tol=0.0025)
-
-#        if bUVAxisPerpendicular:
-#            uaxis = vU / fscaleU
-#            vaxis = vV / fscaleV
-
-#        if not bUVAxisSameScale: # we stretch / scale axes
 
         face[self.scale_rot_layer].xy = f.scale
 
@@ -1954,3 +1795,158 @@ def debug_draw_3dview():
 
 if RUNNING_AS_SCRIPT:
     register()
+
+
+
+#tan_len, bitan_len, fiiiirst, M1 = 0, 0, False, None
+
+
+
+#    def lock(self, only_selected=True):
+#        only_selected = self.me.is_editmode and only_selected
+#        for face in self.bm.faces:
+#            if only_selected and not face.select:
+#                continue
+#        self.lock_face(face)
+
+#    def unlock(self, only_selected=True):
+#        only_selected = self.me.is_editmode and only_selected
+#        for face in self.bm.faces:
+#            if only_selected and not face.select:
+#                continue
+#            self.unlock_face(face)
+
+#    def lock_face(self, face):
+#        f = self.unpack_face_data(face)
+#        if f is None or f.lock_axis:
+#            return
+
+#    def unlock_face(self, face):
+#        f = self.unpack_face_data(face)
+#        if f is None or f.lock_axis:
+#            return
+
+
+
+#        f.transform_attr = rot_mat @ f.transform_attr
+#        row = f.transform_attr.row
+#        face[self.transform_r1_layer] = row[0]
+#        face[self.transform_r2_layer] = row[1]
+#        face[self.transform_r3_layer] = row[2]
+
+#        self.face_offset_texture(face, f, moveDelta, uaxis, vaxis)
+
+#        f.axis_rot_attr.xyzw = rotateAngles[:]
+##        return
+
+#        bIsLocking = True
+#        bIsMoving = moveDelta.length_squared > 0.00001
+
+#        normal = face.normal
+#        normal = f.transform_attr.to_quaternion() @ normal
+#        if f.world_space:
+#            normal = self.rot_world @ normal
+
+#        uaxis, vaxis = self.calc_uvaxes(Vector((0,0,1)), False)
+#        tq = f.transform_attr.to_quaternion()
+#        uaxis = tq @ uaxis
+#        vaxis = tq @ vaxis
+
+#        uaxis, vaxis = self.calc_uvaxes(normal, f.align_face)
+
+##        if mat.is_identity:
+#        print(f.shift_flags_attr.xy)
+#            return
+
+#        fscaleU = uaxis.length
+#        fscaleV = vaxis.length
+#        if isclose(fscaleU, 0): fscaleU = 1
+#        if isclose(fscaleV, 0): fscaleV = 1
+
+#        vU = mat @ uaxis
+#        vV = mat @ vaxis
+
+#        bUVAxisSameScale = isclose(fscaleU, 1) and isclose(fscaleV, 1)
+#        bUVAxisPerpendicular = math.isclose(vU.dot(vV), 0, abs_tol=0.0025)
+
+#        if bUVAxisPerpendicular:
+#            uaxis = vU / fscaleU
+#            vaxis = vV / fscaleV
+
+#        if not bUVAxisSameScale: # we stretch / scale axes
+
+
+
+#    def generate_face_axes(self, face, f):
+#        global tan_len, bitan_len, fiiiirst, M1
+#        center = face.calc_center_median()
+#        vert0 = face.verts[0].co
+#        vert1 = face.verts[1].co
+#        normal = face.normal
+#        if f.world_space:
+#            normal = self.rot_world @ normal
+#            center = self.matrix_world @ center
+#            vert0 = self.matrix_world @ vert0
+#            vert1 = self.matrix_world @ vert1
+#        tangent = vert0 - center
+#        tangent2 = vert1 - center
+#        bitangent = normal.cross(tangent.normalized())
+##        draw_vec(center, normal, (0,0,1))
+##        draw_vec(center, tangent, (0,1,0))
+##        draw_vec(center, tangent2, (0,1,0))
+##        draw_vec(center, bitangent, (0,0,1))
+#        bitangent = tangent2.project(bitangent)
+##        draw_vec(center, bitangent, (1,0,0))
+
+#        M2 = Matrix([(tangent.x,tangent.y,tangent.z,0),
+#                     (bitangent.x,bitangent.y,bitangent.z,0),
+#                     (normal.x,normal.y,normal.z,0),
+#                     (0,0,0,1)])
+
+#        if not fiiiirst:
+#            tan_len = tangent.length
+#            bitan_len = bitangent.length
+#            fiiiirst = True
+#            M1 = M2
+#        else:
+#            M_diff = M1.inverted() @ M2
+#            M_diff.invert()
+##            print(M_diff)
+#            #print(tangent.length/tan_len, " --- ", bitangent.length/bitan_len)
+
+#            up = Vector((0,0,1))
+#            left = Vector((1,0,0))
+#            forward = Vector((0,1,0))
+#            up = M_diff @ up
+#            left = M_diff @ left
+#            forward = M_diff @ forward
+#            origin = Vector((0,0,0))
+#            draw_vec(origin, up, (0,0,1))
+#            draw_vec(origin, left, (1,0,0))
+#            draw_vec(origin, forward, (0,1,0))
+
+
+
+        # get center, vert0, vert1, normal
+        # tangent = vert0-center
+        # tangent2 = vert1-center
+        # bitangent = normal.cross(tangent.normalized())
+        # bitangent scaled by the projection of tangent2 onto bitangent
+        # make a transformation matrix M1
+        #   n0 n1 n2 0    # or something like this idk
+        #   t0 t1 t2 0
+        #   b0 b1 b2 0
+        #   0  0  0  1
+        # repeat that process for the end, get M2
+        # M2 = M? @ M1
+        # M2 @ M1-1 = M? @ M1 @ M1-1
+        # M2 @ M1-1 = M?
+
+#        M2 = M? @ M1
+#        M2 @ M1^-1 = M? @ M1 @ M1^-1
+#        M2 @ M1^-1 = M? @ (M1 @ M1^-1)
+#        M2 @ M1^-1 = M?
+        
+
+        # M? = M1^-1 @ M2
+        # M? = M2^-1 @ M1
