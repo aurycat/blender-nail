@@ -717,37 +717,6 @@ class AURYCAT_OT_nail_edit_texture_config(Operator):
                 layout.label(text="Selected faces have differing plane-align values")
         layout.prop(self, 'uv_align')
 
-    # The 'execute' portion of this operator applies the properties to the selected faces
-    def execute(self, context):
-        cls = AURYCAT_OT_nail_edit_texture_config
-        if self is not cls.last_invoke_self:
-            # New invocation, clear this so the "differing value" labels dont show
-            cls.differing_values = set()
-            cls.locked_alignment = False
-
-        if self.set_shift or self.set_scale or self.set_rotation or self.space_align != 'unset' or self.uv_align != 'unset':
-            tc = TextureConfig.new_unset()
-
-            if self.set_shift:
-                tc.shift = Vector(self.shift)
-            if self.set_scale:
-                tc.scale = Vector(self.scale)
-            if self.set_rotation:
-                tc.rotation = self.rotation
-            if self.space_align != 'unset':
-                tc.flags_set |= TCFLAG_OBJECT_SPACE
-                if self.space_align == 'object':
-                    tc.flags |= TCFLAG_OBJECT_SPACE
-            if self.uv_align != 'unset':
-                tc.flags_set |= TCFLAG_ALIGN_FACE
-                tc.flags_set |= TCFLAG_ALIGN_LOCKED
-                if self.uv_align == 'face':
-                    tc.flags |= TCFLAG_ALIGN_FACE
-
-            set_or_apply_selected_faces(tc, context, set=True, apply=True, only_nailmeshes=True)
-
-        return {'FINISHED'}
-
     # The 'invoke' portion of this operator fills in the default values of the operator
     # from the selected faces, before going to execute.
     def invoke(self, context, event):
@@ -821,6 +790,37 @@ class AURYCAT_OT_nail_edit_texture_config(Operator):
             self.uv_align = 'unset'
 
         return self.execute(context)
+
+    # The 'execute' portion of this operator applies the properties to the selected faces
+    def execute(self, context):
+        cls = AURYCAT_OT_nail_edit_texture_config
+        if self is not cls.last_invoke_self:
+            # New invocation, clear this so the "differing value" labels dont show
+            cls.differing_values = set()
+            cls.locked_alignment = False
+
+        if self.set_shift or self.set_scale or self.set_rotation or self.space_align != 'unset' or self.uv_align != 'unset':
+            tc = TextureConfig.new_unset()
+
+            if self.set_shift:
+                tc.shift = Vector(self.shift)
+            if self.set_scale:
+                tc.scale = Vector(self.scale)
+            if self.set_rotation:
+                tc.rotation = self.rotation
+            if self.space_align != 'unset':
+                tc.flags_set |= TCFLAG_OBJECT_SPACE
+                if self.space_align == 'object':
+                    tc.flags |= TCFLAG_OBJECT_SPACE
+            if self.uv_align != 'unset':
+                tc.flags_set |= TCFLAG_ALIGN_FACE
+                tc.flags_set |= TCFLAG_ALIGN_LOCKED
+                if self.uv_align == 'face':
+                    tc.flags |= TCFLAG_ALIGN_FACE
+
+            set_or_apply_selected_faces(tc, context, set=True, apply=True, only_nailmeshes=True)
+
+        return {'FINISHED'}
 
 
 class AURYCAT_OT_nail_reset_texture_config(Operator):
