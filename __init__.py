@@ -94,9 +94,9 @@ def nail_classes():
         # Operators
         AURYCAT_OT_nail_mark_nailface,
         AURYCAT_OT_nail_clear_nailface,
-        AURYCAT_OT_nail_edit_tex_transform,
-        AURYCAT_OT_nail_clear_tex_transform,
-        AURYCAT_OT_nail_apply_tex_transform,
+        AURYCAT_OT_nail_edit_texture_config,
+        AURYCAT_OT_nail_reset_texture_config,
+        AURYCAT_OT_nail_reapply_texture_config,
         AURYCAT_OT_nail_copy_active_to_selected,
         AURYCAT_OT_nail_locked_transform,
         # Interactive Texture-locked Transform Operators
@@ -342,8 +342,8 @@ class NailPreferences(AddonPreferences):
     bl_idname = PACKAGE_NAME
 
     auto_apply: bpy.props.BoolProperty(
-        name="Auto-Apply Transforms",
-        description="If checked, automatically applies the current transform as objects are transformed or meshes are updated. While in edit mode, only applies to selected faces or their adjacent faces, for efficiency",
+        name="Auto-Apply Textures",
+        description="If checked, automatically applies a NailFaces' texture settings as they are moved or modified. While in edit mode, only applies to selected faces or their adjacent faces, for efficiency",
         default=True,
         update=auto_apply_updated)
 
@@ -362,7 +362,7 @@ class NailPreferences(AddonPreferences):
     use_locked_transform_keymaps: bpy.props.BoolProperty(
         name="Use Locked-Transform Keymaps",
         description="If checked, Nail automatically replaces the G (grab/move) and R (rotate) edit-mode keymaps with Nail's locked-transform variants when a project containing a NailMesh is opened. These operators behave like normal G and R for non-NailMeshes. If unchecked, you can still access the locked-transform operators via the Nail menu",
-        default=True,
+        default=False,
         update=use_locked_transform_keymaps_updated)
 
     @classmethod
@@ -420,14 +420,14 @@ class AURYCAT_MT_nail_main_menu(bpy.types.Menu):
         layout.operator(AURYCAT_OT_nail_clear_nailface.bl_idname)
 
         layout.separator()
-        layout.label(text="Edit Texture Transforms", icon='UV_DATA')
-        layout.operator(AURYCAT_OT_nail_edit_tex_transform.bl_idname)
-        layout.operator(AURYCAT_OT_nail_clear_tex_transform.bl_idname)
-        layout.operator(AURYCAT_OT_nail_apply_tex_transform.bl_idname)
+        layout.label(text="Face Edit", icon='UV_DATA')
+        layout.operator(AURYCAT_OT_nail_edit_texture_config.bl_idname)
+        layout.operator(AURYCAT_OT_nail_reset_texture_config.bl_idname)
+        layout.operator(AURYCAT_OT_nail_reapply_texture_config.bl_idname)
         layout.operator(AURYCAT_OT_nail_copy_active_to_selected.bl_idname)
 
         layout.separator()
-        layout.label(text="Texture Locked Transform", icon='LOCKED')
+        layout.label(text="Texture-Locked Transform", icon='LOCKED')
         layout.operator(AURYCAT_OT_nail_modal_locked_translate.bl_idname)
         layout.operator(AURYCAT_OT_nail_modal_locked_rotate.bl_idname)
         layout.operator(AURYCAT_OT_nail_modal_locked_scale.bl_idname)
@@ -554,11 +554,52 @@ def shared_poll(cls, context, only_face_select=False):
     return True
 
 
-class AURYCAT_OT_nail_edit_tex_transform(Operator):
-    bl_idname = "aurycat.nail_edit_tex_transform"
-    bl_label = "Edit Transform"
+class AURYCAT_OT_nail_mark_nailface(Operator):
+    bl_idname = "aurycat.nail_mark_nailface"
+    bl_label = "Mark NailFace"
     bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Edits the texture shift, scale, rotation, and/or alignment for all selected NailFaces to the chosen values. The default values are that of the active face. If no selected faces are NailFaces, they are all automatically marked NailFace"
+    bl_description = "Enables Nail on the selected faces. This automatically makes the mesh into a \"NailMesh\" (adds necessary attributes) if it isn't already"
+
+    @classmethod
+    def poll(cls, context):
+        return shared_poll(cls, context)
+
+    def execute(self, context):
+        tc = TextureConfig.new_unset()
+        tc.flags_set |= TCFLAG_ENABLED
+        tc.flags |= TCFLAG_ENABLED
+        set_or_apply_selected_faces(tc, context, set=True, apply=True, only_nailmeshes=False)
+        # This action may result in NailMeshes being created; may need wakeup
+        nail_wake_if_needed()
+        return {'FINISHED'}
+
+
+class AURYCAT_OT_nail_clear_nailface(Operator):
+    bl_idname = "aurycat.nail_clear_nailface"
+    bl_label = "Clear NailFace"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Disables Nail on the selected faces"
+
+    @classmethod
+    def poll(cls, context):
+        return shared_poll(cls, context)
+
+    def execute(self, context):
+        tc = TextureConfig.new_unset()
+        tc.flags_set |= TCFLAG_ENABLED
+        set_or_apply_selected_faces(tc, context, set=True, apply=False, only_nailmeshes=True)
+        return {'FINISHED'}
+
+
+class AURYCAT_OT_nail_edit_texture_config(Operator):
+    bl_idname = "aurycat.nail_edit_texture_config"
+    bl_label = "Edit Texture"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "(Opens in operator property window!) Edits the texture shift, scale, rotation, and/or alignment for all selected NailFaces to the chosen values. The default values are that of the active face. If no selected faces are NailFaces, they are all automatically marked NailFace"
+
+    last_invoke_self = None
+    differing_values = set()
+    locked_alignment = False
 
     set_shift: bpy.props.BoolProperty(name="Set Shift")
 
@@ -590,65 +631,131 @@ class AURYCAT_OT_nail_edit_tex_transform(Operator):
         soft_max=math.pi*2,
         step=50)
 
-    space_align_items = (
-        ('unset',                  "<unset>", "Unset or differing values among selected faces"),
-        (str(0),                   "World", "Determine UVs from world-space cube projection"),
-        (str(TCFLAG_OBJECT_SPACE), "Object", "Determine UVs from object-space cube projection"),
-    )
+    def space_align_items(self, _):
+        cls = AURYCAT_OT_nail_edit_texture_config
+        arr = []
+        if 'space_align' in cls.differing_values:
+            arr.append(('unset', "---", "<Don't change>", 0))
+        arr.extend([
+            ('world',  "World",  "Determine UVs from world-space cube projection", 1),
+            ('object', "Object", "Determine UVs from object-space cube projection", 2),
+        ])
+        return arr
+
+    def uv_align_items(self, _):
+        cls = AURYCAT_OT_nail_edit_texture_config
+        arr = []
+        if cls.locked_alignment or 'uv_align' in cls.differing_values:
+            arr.append(('unset', "---", "<Don't change>", 0))
+        arr.extend([
+            ('axis',  "Axis",  "UV projection is aligned to axis planes", 1),
+            ('face',  "Face",  "UV projection is aligned to the face plane", 2),
+        ])
+        return arr
+
     space_align: bpy.props.EnumProperty(
         name="Space Alignment",
         items=space_align_items,
-        default='unset')
+        default=1)
 
-#    plane_align_items = (
-#        ('unset',                "<unset>", "Unset or differing values among selected faces"),
-#        (str(0),                 "Axis", "Projection is aligned to axis planes"),
-#        (str(TCFLAG_ALIGN_FACE), "Face", "Projection is aligned to the face plane"),
-#    )
-#    plane_align: bpy.props.EnumProperty(
-#        name="Plane Alignment",
-#        items=plane_align_items,
-#        default='unset')
+    uv_align: bpy.props.EnumProperty(
+        name="UV Alignment",
+        items=uv_align_items,
+        default=1)
 
     @classmethod
     def poll(cls, context):
         return shared_poll(cls, context)
 
-#    def draw(self, context):
-#        layout = self.layout
-#        layout.use_property_split = True
-#        layout.use_property_decorate = False
-#        layout.prop(self, "shift")
-#        layout.
+    def draw(self, context):
+        cls = AURYCAT_OT_nail_edit_texture_config
 
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        def conditionally_enabled_prop(propname, enabled):
+            s = layout.split()
+            s.enabled = enabled
+            s.prop(self, propname)
+
+        if 'shift' in cls.differing_values:
+            if not self.set_shift:
+                layout.label(text="Selected faces have differing shift values")
+            layout.prop(self, 'set_shift')
+        conditionally_enabled_prop('shift', self.set_shift)
+
+        layout.separator()
+        if 'scale' in cls.differing_values:
+            if not self.set_scale:
+                layout.label(text="Selected faces have differing scale values")
+            layout.prop(self, 'set_scale')
+        conditionally_enabled_prop('scale', self.set_scale)
+
+        layout.separator()
+        if 'rotation' in cls.differing_values:
+            if not self.set_rotation:
+                layout.label(text="Selected faces have differing rotation values")
+            layout.prop(self, 'set_rotation')
+        conditionally_enabled_prop('rotation', self.set_rotation)
+
+        layout.separator()
+        layout.separator()
+        if (self.space_align == 'unset') and ('space_align' in cls.differing_values):
+            layout.label(text="Selected faces have differing space-align values")
+        layout.prop(self, 'space_align')
+
+        layout.separator()
+        if self.uv_align == 'unset':
+            if cls.locked_alignment:
+                s = layout.column()
+                s.scale_y = 0.6
+                s.label(text="Selected face(s) have non-standard UV alignment")
+                s.label(text="This is caused by using Texture-Locked Rotate")
+                s.separator()
+            elif 'uv_align' in cls.differing_values:
+                layout.label(text="Selected faces have differing plane-align values")
+        layout.prop(self, 'uv_align')
+
+    # The 'execute' portion of this operator applies the properties to the selected faces
     def execute(self, context):
-        if ( self.set_shift or
-             self.set_scale or
-             self.set_rotation or
-             self.space_align != 'unset' # or
-#             self.plane_align != 'unset'
-             ):
-            tc = TextureConfig()
+        cls = AURYCAT_OT_nail_edit_texture_config
+        if self is not cls.last_invoke_self:
+            # New invocation, clear this so the "differing value" labels dont show
+            cls.differing_values = set()
+            cls.locked_alignment = False
 
-            if self.space_align != 'unset':
-                tc.flags_set |= TCFLAG_OBJECT_SPACE
-                tc.flags |= int(self.space_align)
-#            if self.plane_align != 'unset':
-#                tc.flags_set |= TCFLAG_ALIGN_FACE
-#                tc.flags |= int(self.plane_align)
+        if self.set_shift or self.set_scale or self.set_rotation or self.space_align != 'unset' or self.uv_align != 'unset':
+            tc = TextureConfig.new_unset()
 
             if self.set_shift:
                 tc.shift = Vector(self.shift)
             if self.set_scale:
                 tc.scale = Vector(self.scale)
-            if self.set_scale:
+            if self.set_rotation:
                 tc.rotation = self.rotation
+            if self.space_align != 'unset':
+                tc.flags_set |= TCFLAG_OBJECT_SPACE
+                if self.space_align == 'object':
+                    tc.flags |= TCFLAG_OBJECT_SPACE
+            if self.uv_align != 'unset':
+                tc.flags_set |= TCFLAG_ALIGN_FACE
+                tc.flags_set |= TCFLAG_ALIGN_LOCKED
+                if self.uv_align == 'face':
+                    tc.flags |= TCFLAG_ALIGN_FACE
 
-            set_or_apply_selected_faces(tc, context, set=True, apply=True)
-                
+            set_or_apply_selected_faces(tc, context, set=True, apply=True, only_nailmeshes=True)
+
         return {'FINISHED'}
 
+    # The 'invoke' portion of this operator fills in the default values of the operator
+    # from the selected faces, before going to execute.
     def invoke(self, context, event):
+        cls = AURYCAT_OT_nail_edit_texture_config
+        cls.last_invoke_self = self
+        cls.differing_values = set()
+        cls.locked_alignment = False
+
         any_selected_faces = [False] # Bool in an array to "pass by reference"
         tc = TextureConfig.from_selected_faces(out_any_selected=any_selected_faces)
 
@@ -659,105 +766,96 @@ class AURYCAT_OT_nail_edit_tex_transform(Operator):
         if not tc.multiple_faces:
             # This implies that no enabled faces were selected
             # Use the default config with enabled set so that these faces become enabled
-            tc = TextureConfig.cleared()
+            tc = TextureConfig.new_default()
             tc.flags |= TCFLAG_ENABLED
             tc.flags_set |= TCFLAG_ENABLED
-            set_or_apply_selected_faces(tc, context, set=True, apply=True)
+            set_or_apply_selected_faces(tc, context, set=True, apply=True, only_nailmeshes=False)
+            # This action may result in NailMeshes being created; may need wakeup
+            nail_wake_if_needed()
 
-        if (tc.flags_set & TCFLAG_OBJECT_SPACE) == TCFLAG_OBJECT_SPACE:
-            self.space_align = str(tc.flags & TCFLAG_OBJECT_SPACE)
-        else:
-            self.space_align = 'unset'
-
-#        if (tc.flags_set & TCFLAG_ALIGN_FACE) == TCFLAG_ALIGN_FACE:
-#            self.plane_align = str(tc.flags & TCFLAG_ALIGN_FACE)
-#        else:
-#            self.plane_align = 'unset'
-
-        self.shift = [0,0]
-        self.scale = [1,1]
-        self.rotation = 0
-        self.set_shift = False
-        self.set_scale = False
-        self.set_rotation = False
+        # Set default value for 'shift' property
         if tc.shift is not None:
             self.shift = tc.shift.to_tuple()
             self.set_shift = True
+        else:
+            cls.differing_values.add('shift')
+            self.shift = [0,0]
+            self.set_shift = False
+
+        # Set default value for 'scale' property
         if tc.scale is not None:
             self.scale = tc.scale.to_tuple()
             self.set_scale = True
+        else:
+            cls.differing_values.add('scale')
+            self.scale = [1,1]
+            self.set_scale = False
+
+        # Set default value for 'rotation' property
         if tc.rotation is not None:
             self.rotation = tc.rotation
             self.set_rotation = True
+        else:
+            cls.differing_values.add('rotation')
+            self.rotation = 0
+            self.set_rotation = False
 
-        return context.window_manager.invoke_props_popup(self, event)
+        # Set default value for 'space_align' property
+        if flag_is_set(tc.flags_set, TCFLAG_OBJECT_SPACE):
+            self.space_align = 'object' if flag_is_set(tc.flags, TCFLAG_OBJECT_SPACE) else 'world'
+        else:
+            cls.differing_values.add('space_align') # Must add this before setting space_align to 'unset' so that space_align_items() includes 'unset' in the enum
+            self.space_align = 'unset'
+
+        # Set default value for 'uv_align' property
+        if flag_is_set(tc.flags_set, TCFLAG_ALIGN_FACE) and flag_is_set(tc.flags_set, TCFLAG_ALIGN_LOCKED):
+            if flag_is_set(tc.flags, TCFLAG_ALIGN_FACE):
+                self.uv_align = 'face'
+            elif flag_is_set(tc.flags, TCFLAG_ALIGN_LOCKED):
+                cls.locked_alignment = True # Must set this before setting uv_align to 'unset' so that uv_align_items() includes 'unset' in the enum
+                self.uv_align = 'unset'
+            else:
+                self.uv_align = 'axis'
+        else:
+            cls.differing_values.add('uv_align') # Must add this before setting uv_align to 'unset' so that uv_align_items() includes 'unset' in the enum
+            self.uv_align = 'unset'
+
+        return self.execute(context)
 
 
-class AURYCAT_OT_nail_apply_tex_transform(Operator):
-    bl_idname = "aurycat.nail_apply_tex_transform"
-    bl_label = "Reapply Transform"
+class AURYCAT_OT_nail_reset_texture_config(Operator):
+    bl_idname = "aurycat.nail_reset_texture_config"
+    bl_label = "Reset Texture"
     bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Reapplies the selected NailFaces' texture transforms. Useful to run after moving or modifying faces. Only necessary if auto-apply transforms is off"
+    bl_description = "Clears texture shift, scale, rotation, and alignment of selected NailFaces to default values"
 
     @classmethod
     def poll(cls, context):
         return shared_poll(cls, context)
 
     def execute(self, context):
-        set_or_apply_selected_faces(None, context, set=False, apply=True)
-        return {'FINISHED'}
-
-
-class AURYCAT_OT_nail_clear_tex_transform(Operator):
-    bl_idname = "aurycat.nail_clear_tex_transform"
-    bl_label = "Clear Transform"
-    bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Clears texture transforms to default values"
-
-    @classmethod
-    def poll(cls, context):
-        return shared_poll(cls, context)
-
-    def execute(self, context):
-        tc = TextureConfig.cleared()
+        tc = TextureConfig.new_default()
         tc.flags_set &= ~TCFLAG_ENABLED # Don't change enabled state
-        set_or_apply_selected_faces(tc, context, set=True, apply=True)
+        set_or_apply_selected_faces(tc, context, set=True, apply=True, only_nailmeshes=True)
         return {'FINISHED'}
 
 
-class AURYCAT_OT_nail_mark_nailface(Operator):
-    bl_idname = "aurycat.nail_mark_nailface"
-    bl_label = "Mark NailFace"
+class AURYCAT_OT_nail_reapply_texture_config(Operator):
+    bl_idname = "aurycat.nail_reapply_texture_config"
+    bl_label = "Reapply Texture"
     bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Enables Nail on the selected faces"
+    bl_description = "Reapply the existing texture shift, scale, rotation, and alignment of the selected NailFaces. Useful to run after moving or modifying faces, but only necessary if auto-apply textures is off"
 
     @classmethod
     def poll(cls, context):
+        if NailPreferences.get('auto_apply'):
+            cls.poll_message_set("Manual reapply not necessary when Auto-Apply Textures is enabled. You can disable auto-apply in Nail's addon preferences")
+            return False
         return shared_poll(cls, context)
 
     def execute(self, context):
-        tc = TextureConfig()
-        tc.flags_set |= TCFLAG_ENABLED
-        tc.flags |= TCFLAG_ENABLED
-        set_or_apply_selected_faces(tc, context, set=True, apply=True)
-        nail_wake_if_needed()
-        return {'FINISHED'}
-
-
-class AURYCAT_OT_nail_clear_nailface(Operator):
-    bl_idname = "aurycat.nail_clear_nailface"
-    bl_label = "Clear NailFace"
-    bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Disables Nail on the selected faces"
-
-    @classmethod
-    def poll(cls, context):
-        return shared_poll(cls, context)
-
-    def execute(self, context):
-        tc = TextureConfig()
-        tc.flags_set |= TCFLAG_ENABLED
-        set_or_apply_selected_faces(tc, context, set=True, apply=False)
+        # Doesn't change enabled state
+        set_or_apply_selected_faces(None, context, set=False, apply=True, only_nailmeshes=True)
         return {'FINISHED'}
 
 
@@ -765,7 +863,7 @@ class AURYCAT_OT_nail_copy_active_to_selected(Operator):
     bl_idname = "aurycat.nail_copy_active_to_selected"
     bl_label = "Copy Active to Selected"
     bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Copies the texture transform of the active selected NailFace to all other selected NailFaces"
+    bl_description = "Copies the texture shift, scale, rotation, and alignment of the active selected NailFace to all other selected NailFaces"
 
     @classmethod
     def poll(cls, context):
@@ -777,8 +875,8 @@ class AURYCAT_OT_nail_copy_active_to_selected(Operator):
             self.report({'ERROR'}, errmsg)
             return {'CANCELLED'}
 
-        tc.flags_set &= ~TCFLAG_ENABLED
-        set_or_apply_selected_faces(tc, context, set=True, apply=True)
+        tc.flags_set &= ~TCFLAG_ENABLED # Don't change enabled state
+        set_or_apply_selected_faces(tc, context, set=True, apply=True, only_nailmeshes=True)
         return {'FINISHED'}
 
 
@@ -834,10 +932,17 @@ class AURYCAT_OT_nail_locked_transform(Operator):
         if isclose(sc.z, 0): sc.z = 1
         mat = Matrix.LocRotScale(self.translate, Euler(self.rotate), sc)
 
+        # I think ideally this would only apply to existing NailMeshes, but
+        # the operator still needs to actually move the faces even if they're
+        # not part of NailMeshes, and that makes things a bit trickier.
+        # Soooo... just turn them into NailMeshes.
         for obj in context.objects_in_mode:
             if obj.type == 'MESH':
-                with NailMesh(obj) as nm:
+                with NailMesh(obj) as nm: # (Turns mesh into NailMesh if not already)
                     nm.locked_transform(mat)
+
+        # This action may result in NailMeshes being created; may need wakeup
+        nail_wake_if_needed()
 
         return {'FINISHED'}
 
@@ -896,7 +1001,10 @@ def keybind_poll(context):
     if not shared_poll(None, context, only_face_select=True):
         return False
     # Check for at least one NailMesh object in edit mode
-    return any_nail_meshes()
+    for obj in context.objects_in_mode:
+        if NailMesh.is_nail_object(obj):
+            return True
+    return False
 
 
 # Use this for keybinds.
@@ -1117,25 +1225,41 @@ class SharedFinalizeInteractiveTexLockedTransform:
     # property window. The enum is always disabled, so it can't be changed. It's just
     # there to look nice and remind the user what the current orientation is.
     orient_type: bpy.props.StringProperty(
-        name="Orient Type", default="GLOBAL", options={'HIDDEN'})
+        name="Orient Type",
+        default="GLOBAL",
+        options={'HIDDEN'})
     orient_type_enum: bpy.props.EnumProperty(
-        name="Orientation", items=orient_type_enum_items,
-        description=
-"This is just for reference. In order to change the orientation, change it " +
-"for the whole 3D view before starting the texture-locked transform operation")
+        name="Orientation",
+        items=orient_type_enum_items,
+        description="This is just for reference. In order to change the orientation, change it for the whole 3D view before starting the texture-locked transform operation")
 
     orient_matrix: bpy.props.FloatVectorProperty(
-        name="Orient", default=[0]*9, subtype='MATRIX', size=9, options={'HIDDEN'})
+        name="Orient",
+        default=[0]*9,
+        subtype='MATRIX',
+        size=9,
+        options={'HIDDEN'})
 
     def execute(self, context):
         orient = self.orient_matrix.to_4x4()
         iorient = orient.inverted()
         mat = iorient @ self.get_matrix() @ orient
 
+        # I think ideally this would only apply to existing NailMeshes, but
+        # the operator still needs to actually move the faces even if they're
+        # not part of NailMeshes, and that makes things a bit trickier.
+        # Soooo... just turn them into NailMeshes.
+        #
+        # Note that at least for the keybinds, they only call into this
+        # texture-locked transform if at least one object in edit mode is
+        # a NailMesh. Otherwise they use standard Blender transform operators.
         for obj in context.objects_in_mode:
-            if NailMesh.is_nail_object(obj):
-                with NailMesh(obj) as nm:
+            if obj.type == 'MESH':
+                with NailMesh(obj) as nm: # (Turns mesh into NailMesh if not already)
                     nm.locked_transform(mat)
+
+        # This action may result in NailMeshes being created; may need wakeup
+        nail_wake_if_needed()
 
         if self.modal_hack:
             self.modal_hack = False
@@ -1286,9 +1410,16 @@ def validate_scale(s):
 def repr_flags(f):
     return f"{f:04b}" if f is not None else "None"
 
-def set_or_apply_selected_faces(tc, context, set=False, apply=False):
+def set_or_apply_selected_faces(tc, context, set=False, apply=False, only_nailmeshes=False):
     for obj in context.objects_in_mode:
-        if obj.type == 'MESH':
+        if only_nailmeshes:
+            # Only apply to existing NailMeshes
+            ok = NailMesh.is_nail_object(obj)
+        else:
+            # Apply to all meshes in editmode (turns them into NailMeshes if not already)
+            ok = (obj.type == 'MESH')
+
+        if ok:
             with NailMesh(obj) as nm:
                 if set:
                     nm.set_texture_config(tc)
@@ -1360,7 +1491,11 @@ class TextureConfig:
         tc.multiple_faces = False
 
     @classmethod
-    def cleared(cls):
+    def new_unset(cls):
+        return TextureConfig()
+
+    @classmethod
+    def new_default(cls):
         tc = TextureConfig()
         tc.flags = 0
         tc.flags_set = TCFLAG_ALL
@@ -1373,8 +1508,8 @@ class TextureConfig:
     # Also this function has a side gig of checking if any faces are selected at all
     @classmethod
     def from_selected_faces(cls, out_any_selected=[False]):
-        tc = TextureConfig()
-        for obj in bpy.context.selected_objects:
+        tc = TextureConfig.new_unset()
+        for obj in bpy.context.objects_in_mode:
             if NailMesh.is_nail_object(obj):
                 with NailMesh(obj, readonly=True) as nm:
                     nm.get_texture_config(tc, out_any_selected=out_any_selected)
@@ -1393,7 +1528,7 @@ class TextureConfig:
         with NailMesh(active, readonly=True) as nm:
             if nm.bm.faces.active is None or not nm.bm.faces.active.select:
                 return None, "No active selected face"
-            tc = TextureConfig()
+            tc = TextureConfig.new_unset()
             if not nm.get_texture_config_one_face(nm.bm.faces.active, tc):
                 return None, "Active face is not a NailFace"
             return tc, None
