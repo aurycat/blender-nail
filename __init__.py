@@ -844,13 +844,10 @@ class AURYCAT_OT_nail_reapply_texture_config(Operator):
     bl_idname = "aurycat.nail_reapply_texture_config"
     bl_label = "Reapply Texture"
     bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Reapply the existing texture shift, scale, rotation, and alignment of the selected NailFaces. Useful to run after moving or modifying faces, but only necessary if auto-apply textures is off"
+    bl_description = "Reapply the existing texture shift, scale, rotation, and alignment of the selected NailFaces.\nUseful to run this after moving or modifying faces, but rarely needed when Auto-Apply Textures is enabled"
 
     @classmethod
     def poll(cls, context):
-        if NailPreferences.get('auto_apply'):
-            cls.poll_message_set("Manual reapply not necessary when Auto-Apply Textures is enabled. You can disable auto-apply in Nail's addon preferences")
-            return False
         return shared_poll(cls, context)
 
     def execute(self, context):
@@ -884,7 +881,7 @@ class AURYCAT_OT_nail_locked_transform(Operator):
     bl_idname = "aurycat.nail_locked_transform"
     bl_label = "Texture-Locked Transform"
     bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Transforms selected faces while attempting to retain the same relative texture transform"
+    bl_description = "Transforms selected faces while attempting to retain the same relative texture transform. Note that scaling operations which shear the mesh will not correctly preserve the texture"
 
     translate: bpy.props.FloatVectorProperty(
         name="Translate",
