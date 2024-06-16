@@ -631,17 +631,6 @@ class AURYCAT_OT_nail_edit_texture_config(Operator):
         soft_max=math.pi*2,
         step=50)
 
-    def space_align_items(self, _):
-        cls = AURYCAT_OT_nail_edit_texture_config
-        arr = []
-        if 'space_align' in cls.differing_values:
-            arr.append(('unset', "---", "<Don't change>", 0))
-        arr.extend([
-            ('world',  "World",  "Determine UVs from world-space cube projection", 1),
-            ('object', "Object", "Determine UVs from object-space cube projection", 2),
-        ])
-        return arr
-
     def uv_align_items(self, _):
         cls = AURYCAT_OT_nail_edit_texture_config
         arr = []
@@ -653,14 +642,25 @@ class AURYCAT_OT_nail_edit_texture_config(Operator):
         ])
         return arr
 
-    space_align: bpy.props.EnumProperty(
-        name="Space Alignment",
-        items=space_align_items,
-        default=1)
+    def space_align_items(self, _):
+        cls = AURYCAT_OT_nail_edit_texture_config
+        arr = []
+        if 'space_align' in cls.differing_values:
+            arr.append(('unset', "---", "<Don't change>", 0))
+        arr.extend([
+            ('world',  "World",  "Determine UVs from world-space cube projection", 1),
+            ('object', "Object", "Determine UVs from object-space cube projection", 2),
+        ])
+        return arr
 
     uv_align: bpy.props.EnumProperty(
         name="UV Alignment",
         items=uv_align_items,
+        default=1)
+
+    space_align: bpy.props.EnumProperty(
+        name="Space Alignment",
+        items=space_align_items,
         default=1)
 
     @classmethod
@@ -701,11 +701,6 @@ class AURYCAT_OT_nail_edit_texture_config(Operator):
 
         layout.separator()
         layout.separator()
-        if (self.space_align == 'unset') and ('space_align' in cls.differing_values):
-            layout.label(text="Selected faces have differing space-align values")
-        layout.prop(self, 'space_align')
-
-        layout.separator()
         if self.uv_align == 'unset':
             if cls.locked_alignment:
                 s = layout.column()
@@ -714,8 +709,13 @@ class AURYCAT_OT_nail_edit_texture_config(Operator):
                 s.label(text="This is caused by using Texture-Locked Rotate")
                 s.separator()
             elif 'uv_align' in cls.differing_values:
-                layout.label(text="Selected faces have differing plane-align values")
+                layout.label(text="Selected faces have differing UV alignment values")
         layout.prop(self, 'uv_align')
+
+        layout.separator()
+        if (self.space_align == 'unset') and ('space_align' in cls.differing_values):
+            layout.label(text="Selected faces have differing space alignment values")
+        layout.prop(self, 'space_align')
 
     # The 'invoke' portion of this operator fills in the default values of the operator
     # from the selected faces, before going to execute.
@@ -1392,17 +1392,31 @@ def project_point_onto_plane(point, normal, origin):
 def isclose(a, b):
     return math.isclose(a, b, abs_tol=1e-5)
 
-def vec_is_zero(v):
+def vec3_isclose(a, b):
+    return isclose(a.x, b.x) and isclose(a.y, b.y) and isclose(a.z, b.z)
+
+def vec3_is_zero(v):
     return isclose(v.x, 0) and isclose(v.y, 0) and isclose(v.z, 0)
 
 # https://developer.download.nvidia.com/cg/frac.html
+# The output is always in the range  0 <= out < 1 .
+# Negative values are wrapped around, for example,
+#    frac( 0.2) = 0.2
+#    frac(-0.2) = 0.8
 def frac(f):
     return f - math.floor(f)
 
-def validate_scale(s):
-    if isclose(s.x, 0): s.x = 1
-    if isclose(s.y, 0): s.y = 1
-    return s
+# Like frac but returns values in the range -1 < out < 1 . In particular, if
+# the result has the same sign as the input. This can result in slightly more
+# human-friendly shift values.
+#    frag_n1to1( 0.2) =  0.2
+#    frag_n1to1(-0.2) = -0.2
+#    frag_n1to1(-1.2) = -0.2
+def frac_n1to1(f):
+    x = frac(math.fabs(f))
+    # Copies sign of f onto value of x. The '+ 0' forces a negative zero
+    # to be converted to normal positive zero.
+    return math.copysign(x, f) + 0
 
 def repr_flags(f):
     return f"{f:04b}" if f is not None else "None"
@@ -1656,7 +1670,7 @@ class NailMesh:
     # tc is an in-out parameter
     # Returns True if the face has Nail enabled, False otherwise (tc not modified)
     def get_texture_config_one_face(self, face, tc):
-        f = self.unpack_face_data(face)
+        f = self.unpack_face_data(face, calc_normal=False)
         if f is None:
             return False
 
@@ -1694,6 +1708,8 @@ class NailMesh:
 
         return True
 
+    # Applies the existing saved shift/scale/rotation uv axis configurations
+    # of selected faces. See apply_texture_one_face for more detail.
     def apply_texture(self, auto_apply=False, editmode_only_selected=True):
         apply_mode = 0 # All faces
         if self.me.is_editmode and editmode_only_selected:
@@ -1724,12 +1740,16 @@ class NailMesh:
 
             self.apply_texture_one_face(face)
 
+    # Applies a face's existing saved shift/scale/rotation/uv axis configuration
+    # to the face's UVs. When auto-apply is enabled, this is called constantly,
+    # for every face each time the face is modified. Also this is called when the
+    # 'Reapply Texture' operator is manually invoked.
     def apply_texture_one_face(self, face):
         f = self.unpack_face_data(face)
         if f is None:
             return
 
-        uaxis, vaxis = self.get_face_uv_axes(face, f)
+        uaxis, vaxis = self.get_face_uv_axes(f)
 
         rotation_mat = Matrix.Rotation(f.rotation, 2)
         uv_layer = self.uv_layer
@@ -1753,6 +1773,8 @@ class NailMesh:
             for loop in face.loops:
                 loop[uv_layer].uv += diff_coord0
 
+    # Updates the texture shift, scale, and uv axes of selected faces by the given
+    # transform matrix. The matrix must always be a world-space transformation.
     def locked_transform(self, mat, only_selected=True):
         only_selected = self.me.is_editmode and only_selected
         verts = set()
@@ -1764,80 +1786,135 @@ class NailMesh:
             first_face = face
             break
 
+        # TODO: Is this still needed? Why?
         if first_face is not None:
             space = Matrix.Translation(-first_face.calc_center_median())
             ispace = Matrix.Translation(first_face.calc_center_median())
             mat = ispace @ mat @ space
 
+        translation = mat.translation.xyz
+        mat_no_translation = mat.copy()
+        mat_no_translation.translation.xyz = 0
+
         for face in self.bm.faces:
             if only_selected and not face.select:
                 continue
-            self.locked_transform_one_face(face, mat)
+            self.locked_transform_one_face(face, mat_no_translation, translation)
             verts.update(face.verts)
 
         bmesh.ops.transform(self.bm, matrix=mat, verts=list(verts))
 
-    def locked_transform_one_face(self, face, mat):
+    # Updates the texture shift, scale, and uv axes of the given face by the given
+    # transform matrix. The matrix must always be a world-space transformation.
+    # The matrix must have its translation component zeroed out, and passed via
+    # the translation arg instead.
+    def locked_transform_one_face(self, face, mat, translation):
         f = self.unpack_face_data(face)
         if f is None:
             return
 
-        uaxis, vaxis = self.get_face_uv_axes(face, f)
+        # Translation is passed separately, so if the matrix is identity it means
+        # the transformation is translation-only. In that case we don't need to
+        # calculate new uv axes, since they won't change, and consequently we don't
+        # need to set the ALIGN_LOCKED flag
+        translation_only = mat.is_identity
 
-        mat_copy = mat.copy()
-        moveDelta = mat_copy.translation.xyz
-        mat_copy.translation.xyz = 0
+        # Get the existing uv axes
+        # Note these vectors are always normalized
+        uaxis, vaxis = self.get_face_uv_axes(f)
 
-        uaxis = mat_copy @ uaxis
-        vaxis = mat_copy @ vaxis
-        uLength = uaxis.length
-        vLength = vaxis.length
+        if not translation_only:
+            # Rotate & scale the uv axes by the matrix. The new length of uaxis and
+            # vaxis gives us a multiplication factor for the scale of the texture
+            uaxis = mat @ uaxis
+            vaxis = mat @ vaxis
 
-        f.scale.x *= uLength
-        f.scale.y *= vLength
+            # Apply scale changes
+            f.scale.x *= uaxis.length # These should be divided by the original u and vaxis
+            f.scale.y *= vaxis.length # lengths, but those are always 1, so it's not necessary.
+            # Save updated scale
+            f.scale_rot_attr.xy = f.scale
 
-        uaxis.normalize()
-        vaxis.normalize()
+            # Scale has been applied, so the UV axes can be normalized again
+            uaxis.normalize()
+            vaxis.normalize()
 
-        self.face_offset_texture(face, f, moveDelta, uaxis, vaxis)
+            # Before "locking in" as ALIGNED_LOCKED, check to see if the new UV axes
+            # are the same as Axis or Face alignment modes would be. That can happen
+            # if a face is rotated 90 degrees, for example. If so, we can switch to
+            # Axis or Face alignment instead, which makes future texture projection
+            # more likely to do "what the user expects"(TM).
 
-        f.lock_uaxis_attr.xyz = uaxis
-        f.lock_vaxis_attr.xyz = vaxis
+            # Update the cached face normal manually since the face hasn't actually
+            # been transformed yet. (normal used by get_axis/face_aligned_uv_axes() )
+            f.normal = mat @ f.normal
 
-        flags = f.flags
-        flags = flag_set(flags, TCFLAG_ALIGN_LOCKED)
-        flags = flag_clear(flags, TCFLAG_ALIGN_FACE)
-        f.shift_flags_attr.z = flags
+            flags = f.flags
 
-        face[self.scale_rot_layer].xy = f.scale
-
-    def face_offset_texture(self, face, f, moveDelta, uaxis, vaxis):
-        f.shift_flags_attr.x -= moveDelta.dot(uaxis) / f.scale.x
-        f.shift_flags_attr.y -= moveDelta.dot(vaxis) / f.scale.y
-
-    def get_face_uv_axes(self, face, f):
-        if f.align_locked:
-            uaxis = f.lock_uaxis_attr
-            vaxis = f.lock_vaxis_attr
-        else:
-            normal = face.normal
-            if f.world_space:
-                normal = self.rot_world @ normal
-
-            orientation = face_orientation(normal)
-            vaxis = UP_VECTORS[orientation]
-            if f.align_face:
-                uaxis = normal.cross(vaxis)
-                uaxis.normalize()
-                vaxis = uaxis.cross(normal)
-                vaxis.normalize()
-                uaxis.negate()
+            aa_uaxis, aa_vaxis = self.get_axis_aligned_uv_axes(f)
+            if vec3_isclose(uaxis, aa_uaxis) and vec3_isclose(vaxis, aa_vaxis): #uaxis == aa_uaxis and vaxis == aa_vaxis:
+                # Great news, the new axes are the same as axis-aligned mode! Switch to that
+                flags = flag_clear(flags, TCFLAG_ALIGN_LOCKED)
+                flags = flag_clear(flags, TCFLAG_ALIGN_FACE)
             else:
-                uaxis = RIGHT_VECTORS[orientation]
+                fa_uaxis, fa_vaxis = self.get_face_aligned_uv_axes(f)
+                if vec3_isclose(uaxis, fa_uaxis) and vec3_isclose(vaxis, fa_vaxis):
+                    # Same as face-aligned mode, slightly less great but still nice
+                    flags = flag_clear(flags, TCFLAG_ALIGN_LOCKED)
+                    flags = flag_set(flags, TCFLAG_ALIGN_FACE)
+                else:
+                    # Ok need to use locked axes :(
+                    flags = flag_set(flags, TCFLAG_ALIGN_LOCKED)
+                    flags = flag_clear(flags, TCFLAG_ALIGN_FACE)
+                    # Save updated UV axes
+                    f.lock_uaxis_attr.xyz = uaxis
+                    f.lock_vaxis_attr.xyz = vaxis
 
+            # Save updated flags
+            f.shift_flags_attr.z = flags
+
+        # Compute the new texture shift value by projecting the translation
+        # onto the new UV axes.
+        f.shift.x -= translation.dot(uaxis) / f.scale.x
+        f.shift.y -= translation.dot(vaxis) / f.scale.y
+        f.shift.x = frac_n1to1(f.shift.x) # Wrap the values to the range (-1, 1)
+        f.shift.y = frac_n1to1(f.shift.y)
+        # Save updated shift value
+        f.shift_flags_attr.xy = f.shift
+
+    # Expects f.normal to be set (unpack_face_data calc_normal=True)
+    def get_face_uv_axes(self, f):
+        if f.align_locked:
+            return (f.lock_uaxis_attr, f.lock_vaxis_attr)
+        else:
+            # In face-aligned or axis-aligned mode, the UV axes aren't saved.
+            # (The saved lock_u/vaxis_attr values are ignored.) Instead, they
+            # are computed based on the face's normal
+            if f.align_face:
+                return self.get_face_aligned_uv_axes(f)
+            else:
+                return self.get_axis_aligned_uv_axes(f)
+
+    # Axis-aligned mode is the same as a standard box projection.
+    # (Expects f.normal to be set -- unpack_face_data calc_normal=True)
+    def get_axis_aligned_uv_axes(self, f):
+        orientation = face_orientation(f.normal)
+        return (RIGHT_VECTORS[orientation], UP_VECTORS[orientation])
+
+    # Face-aligned mode is similar but takes rotation into account,
+    # somewhat. It's a little weird but it's how Hammer does it!
+    # (Expects f.normal to be set -- unpack_face_data calc_normal=True)
+    def get_face_aligned_uv_axes(self, f):
+        orientation = face_orientation(f.normal)
+        vaxis = UP_VECTORS[orientation]
+        uaxis = f.normal.cross(vaxis)
+        uaxis.normalize()
+        vaxis = uaxis.cross(f.normal)
+        vaxis.normalize()
+        uaxis.negate()
         return (uaxis, vaxis)
 
-    def unpack_face_data(self, face):
+    def unpack_face_data(self, face, calc_normal=True):
         class NailFace:
             pass
 
@@ -1853,20 +1930,40 @@ class NailMesh:
         f.lock_uaxis_attr = face[self.lock_uaxis_layer]
         f.lock_vaxis_attr = face[self.lock_vaxis_layer]
 
+        # Initialize default (0,0,0) values to reasonable uv axes
         if f.lock_uaxis_attr == VEC3_ATTR_DEFAULT:
             f.lock_uaxis_attr.xyz = RIGHT_VECTORS[0]
         if f.lock_vaxis_attr == VEC3_ATTR_DEFAULT:
             f.lock_vaxis_attr.xyz = UP_VECTORS[0]
 
+        # Prevent scale from being 0 on either axis (also initializes for default values)
+        if isclose(f.scale_rot_attr.x, 0):
+            f.scale_rot_attr.x = 1
+        if isclose(f.scale_rot_attr.y, 0):
+            f.scale_rot_attr.y = 1
+
+        # Note f.shift, f.scale, and f.rotation are only copies of the data
+        # saved in the mesh attributes (accessing a Vector via the .xyzw
+        # swizzle components returns a copy of the Vector, although assigning
+        # to them modifies the vector). To modify the actual saved values,
+        # modify the f.***_attr variables directly.
         f.shift = shift_flags_attr.xy
-        f.scale = validate_scale(f.scale_rot_attr.xy)
+        f.scale = f.scale_rot_attr.xy
         f.rotation = f.scale_rot_attr.z
 
         f.flags = flags
         f.world_space = not flag_is_set(flags, TCFLAG_OBJECT_SPACE)
-        # align_face and align_locked are mutually exclusive
+        # Note, align_face and align_locked are mutually exclusive
         f.align_face = flag_is_set(flags, TCFLAG_ALIGN_FACE)
         f.align_locked = flag_is_set(flags, TCFLAG_ALIGN_LOCKED)
+
+        # Calculate normal in advance since it's usually needed
+        if calc_normal:
+            normal = face.normal
+            if f.world_space:
+                normal = self.rot_world @ normal
+            f.normal = normal
+
         return f
 
 
