@@ -42,6 +42,7 @@ import bmesh
 import math
 import enum
 import traceback
+import numpy
 from bpy.types import Operator, Macro, AddonPreferences
 from bpy.app.handlers import persistent
 from mathutils import Euler, Vector, Matrix, Quaternion
@@ -360,7 +361,7 @@ class NailPreferences(AddonPreferences):
         default=True)
 
     use_locked_transform_keymaps: bpy.props.BoolProperty(
-        name="Use Locked-Transform Keymaps",
+        name="Use Texture-Locked Transform keymap overrides for G and R",
         description="If checked, Nail automatically replaces the G (grab/move) and R (rotate) edit-mode keymaps with Nail's locked-transform variants when a project containing a NailMesh is opened. These operators behave like normal G and R for non-NailMeshes. If unchecked, you can still access the locked-transform operators via the Nail menu",
         default=False,
         update=use_locked_transform_keymaps_updated)
@@ -881,7 +882,7 @@ class AURYCAT_OT_nail_locked_transform(Operator):
     bl_idname = "aurycat.nail_locked_transform"
     bl_label = "Texture-Locked Transform"
     bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Transforms selected faces while attempting to retain the same relative texture transform. Note that scaling operations which shear the mesh will not correctly preserve the texture"
+    bl_description = "Transforms selected faces while attempting to retain the same relative texture transform (only object-space transform supported). Note that scaling operations which shear the mesh will not correctly preserve the texture"
 
     translate: bpy.props.FloatVectorProperty(
         name="Translate",
@@ -958,7 +959,7 @@ class AURYCAT_OT_nail_modal_locked_translate(Operator):
     bl_description = "Move selected faces, adjusting their NailFace shift & scale to keep the texture in the same relative position"
     @classmethod
     def poll(cls, context):
-        return shared_poll(cls, context, only_face_select=True)
+        return shared_poll(cls, context, only_face_select=True) and check_pivot_point(cls, context, True)
     def execute(self, context):
         AURYCAT_OT_nail_internal_modal_locked_transform.getop()('INVOKE_DEFAULT', mode='move')
         return {'FINISHED'}
@@ -971,7 +972,7 @@ class AURYCAT_OT_nail_modal_locked_rotate(Operator):
     bl_description = "Rotate selected faces, adjusting their NailFace shift, scale, and UV axis to keep the texture in the same relative position"
     @classmethod
     def poll(cls, context):
-        return shared_poll(cls, context, only_face_select=True)
+        return shared_poll(cls, context, only_face_select=True) and check_pivot_point(cls, context, True)
     def execute(self, context):
         AURYCAT_OT_nail_internal_modal_locked_transform.getop()('INVOKE_DEFAULT', mode='rotate')
         return {'FINISHED'}
@@ -984,7 +985,7 @@ class AURYCAT_OT_nail_modal_locked_scale(Operator):
     bl_description = "Scale selected faces, adjusting their NailFace shift, scale, and UV axis to keep the texture in the same relative position. Note that scaling operations which shear the mesh will not correctly preserve the texture"
     @classmethod
     def poll(cls, context):
-        return shared_poll(cls, context, only_face_select=True)
+        return shared_poll(cls, context, only_face_select=True) and check_pivot_point(cls, context, True)
     def execute(self, context):
         AURYCAT_OT_nail_internal_modal_locked_transform.getop()('INVOKE_DEFAULT', mode='scale')
         return {'FINISHED'}
@@ -1013,6 +1014,8 @@ class AURYCAT_OT_nail_keybind_modal_locked_translate(Operator):
     def execute(self, context):
         if not keybind_poll(context):
             bpy.ops.transform.translate('INVOKE_DEFAULT')
+        elif not check_pivot_point(self, context, False):
+            return {'CANCELLED'}
         else:
             AURYCAT_OT_nail_internal_modal_locked_transform.getop()('INVOKE_DEFAULT', mode='move')
         return {'FINISHED'}
@@ -1027,8 +1030,10 @@ class AURYCAT_OT_nail_keybind_modal_locked_rotate(Operator):
     def execute(self, context):
         if not keybind_poll(context):
             bpy.ops.transform.rotate('INVOKE_DEFAULT')
+        elif not check_pivot_point(self, context, False):
+            return {'CANCELLED'}
         else:
-            AURYCAT_OT_nail_internal_modal_locked_transform.getop()('INVOKE_DEFAULT', mode='rotate')
+            AURYCAT_OT_nail_internal_modal_locked_transform.getop()(mode='rotate')
         return {'FINISHED'}
 
 
@@ -1069,7 +1074,11 @@ class AURYCAT_OT_nail_internal_modal_locked_transform(Operator):
             return False
         return True
 
+    def invoke(self, context, event):
+        return self.execute(context)
+
     def execute(self, context):
+
         if ( (AURYCAT_OT_nail_internal_modal_locked_transform.active is not None) and
              not AURYCAT_OT_nail_internal_modal_locked_transform.active.cancelled ):
             AURYCAT_OT_nail_internal_modal_locked_transform.active.cancelled = True
@@ -1238,9 +1247,27 @@ class SharedFinalizeInteractiveTexLockedTransform:
         options={'HIDDEN'})
 
     def execute(self, context):
-        orient = self.orient_matrix.to_4x4()
-        iorient = orient.inverted()
-        mat = iorient @ self.get_matrix() @ orient
+        # Get the local transform of the transform op
+        mat = self.get_op_transform_matrix()
+        print("base mat")
+        print(mat)
+
+        # # Convert that local transform to the orient space
+        # # If transformation orientation is GLOBAL, this is a no-op (TODO wait maybe not if object isnt at origin)
+        # orient = self.orient_matrix.to_4x4()
+        # iorient = orient.inverted()
+        # mat = iorient @ self.get_op_transform_matrix() @ orient
+        # print("orient mat")
+        # print(orient)
+        # print("oriented mat")
+        # print(mat)
+
+        # # Convert the transformation to be around the pivot point (except for translation)
+        # if self.uses_pivot_point:
+        #     pivot_point = compute_pivot_point()
+        #     pivot = Matrix.Translation(-pivot_point)
+        #     ipivot = Matrix.Translation(pivot_point)
+        #     mat = ipivot @ mat @ pivot
 
         # I think ideally this would only apply to existing NailMeshes, but
         # the operator still needs to actually move the faces even if they're
@@ -1253,7 +1280,9 @@ class SharedFinalizeInteractiveTexLockedTransform:
         for obj in context.objects_in_mode:
             if obj.type == 'MESH':
                 with NailMesh(obj) as nm: # (Turns mesh into NailMesh if not already)
-                    nm.locked_transform(mat)
+                    mlocal = mat.copy()
+                    # mlocal = obj.matrix_world.inverted() @ mlocal
+                    nm.locked_transform(mlocal)
 
         # This action may result in NailMeshes being created; may need wakeup
         nail_wake_if_needed()
@@ -1287,20 +1316,22 @@ class SharedFinalizeInteractiveTexLockedTransform:
 class AURYCAT_OT_nail_internal_end_locked_translate(SharedFinalizeInteractiveTexLockedTransform, Operator):
     bl_idname = "aurycat.nail_internal_end_locked_translate"
     bl_label = "Nail Texture-Locked Move"
+    uses_pivot_point = False
     value: bpy.props.FloatVectorProperty(
         name="Move", default=[0]*3, subtype='TRANSLATION')
-    def get_matrix(self):
+    def get_op_transform_matrix(self):
         return Matrix.Translation(self.value)
 
 
 class AURYCAT_OT_nail_internal_end_locked_rotate(SharedFinalizeInteractiveTexLockedTransform, Operator):
     bl_idname = "aurycat.nail_internal_end_locked_rotate"
     bl_label = "Nail Texture-Locked Rotate"
+    uses_pivot_point = True
     orient_axis: bpy.props.EnumProperty(
         name="Axis", items=[('X',"X","X"), ('Y',"Y","Y"), ('Z',"Z","Z")])
     value: bpy.props.FloatProperty(
         name="Angle", default=0, subtype='ANGLE')
-    def get_matrix(self):
+    def get_op_transform_matrix(self):
         v = self.value
         # I'm not sure why the value needs to be negated for 'VIEW' orientations
         if self.orient_type == 'VIEW': v = -v
@@ -1310,9 +1341,10 @@ class AURYCAT_OT_nail_internal_end_locked_rotate(SharedFinalizeInteractiveTexLoc
 class AURYCAT_OT_nail_internal_end_locked_scale(SharedFinalizeInteractiveTexLockedTransform, Operator):
     bl_idname = "aurycat.nail_internal_end_locked_scale"
     bl_label = "Nail Texture-Locked Scale"
+    uses_pivot_point = True
     value: bpy.props.FloatVectorProperty(
         name="Scale", default=[0]*3, subtype='XYZ')
-    def get_matrix(self):
+    def get_op_transform_matrix(self):
         return Matrix.Diagonal(self.value[:] + (1,))
 
 
@@ -1479,6 +1511,93 @@ def no_except(func, silent=False):
         if not silent:
             print("Error in Nail addon:")
             print(traceback.format_exc())
+
+# Used as operator poll to validate the context before compute_pivot_point can be called
+#
+# Note! For a GLOBAL transformation orientation, using Individual Origins for translations
+# is fine, the axis/axes will be the same for all parts. But for other orientations, e.g.
+# NORMAL, then the axes will be different for different parts. So, just to be safe, always
+# prohibit Individual Origins even for translation.
+def check_pivot_point(self_or_cls, context, is_poll):
+    if context.scene.tool_settings.transform_pivot_point == 'INDIVIDUAL_ORIGINS':
+        msg = "'Individual Origins' pivot point mode is not supported for modal Nail Texture-Locked Transforms. Please pick a different pivot mode, or disable / don't use Texture-Locked Transform."
+        if (not is_poll) and NailPreferences.get('use_locked_transform_keymaps'):
+            msg += "\n(Note Nail G and R keymap overrides can be disabled in Nail addon preferences!)"
+        if is_poll:
+            self_or_cls.poll_message_set(msg)
+        else:
+            self_or_cls.report({'ERROR'}, msg)
+        return False
+    return True
+
+# Computes the current pivot point using the active selection and pivot mode.
+# Only supports edit mode & face selection mode.
+#
+# This needs to compute the pivot points in the same way that Blender does for
+# its transform operations, in order for the modal Texture-Locked Transform
+# operators to work correctly.
+def compute_pivot_point():
+    pivot_mode = bpy.context.scene.tool_settings.transform_pivot_point
+
+    def get_selected_verts():
+        vert_coords = []
+        for obj in bpy.context.objects_in_mode:
+            if obj.type == 'MESH' and obj.data.is_editmode:
+                bm = bmesh.from_edit_mesh(obj.data)
+                if bm.select_mode != {'FACE'}:
+                    raise NotImplementedError("compute_pivot_point needs face selection mode")
+                for v in bm.verts:
+                    if v.select:
+                        vert_coords.append(v.co.to_tuple())
+                bm.free()
+        return vert_coords
+
+    if pivot_mode == 'BOUNDING_BOX_CENTER':
+        vert_coords = get_selected_verts()
+        if len(vert_coords) == 0:
+            return Vector()
+        mn = numpy.amin(vert_coords, axis=0)
+        mx = numpy.amax(vert_coords, axis=0)
+        bb_center = numpy.mean([mn, mx], axis=0)
+        return Vector(bb_center)
+
+    elif pivot_mode == 'CURSOR':
+        return bpy.context.scene.cursor.location
+
+    elif pivot_mode == 'INDIVIDUAL_ORIGINS':
+        # Not supported because there will be multiple pivot points.
+        # Also Blender groups connected faces together as "individuals"
+        # and determining which sets of faces are connected sounds slow.
+        # .. and also I don't feel like it.
+        raise NotImplementedError("compute_pivot_point does not support Individual Origins pivot mode")
+
+    elif pivot_mode == 'MEDIAN_POINT':
+        vert_coords = get_selected_verts()
+        if len(vert_coords) == 0:
+            return Vector()
+        # Blender calls it 'Median', but its really just the mean/average position
+        # of the vertices. Also it's based on vertices even in face selection mode.
+        #
+        # Surprisingly numpy.mean is a tad slower than just adding together all the
+        # v.co Vectors together and dividing by the total, but that can get significant
+        # precision loss if there's a lot of verts. numpy.mean has better precision.
+        median_point = numpy.mean(vert_coords, axis=0)
+        return Vector(median_point)
+
+    elif pivot_mode == 'ACTIVE_ELEMENT':
+        obj = bpy.context.active_object
+        pos = Vector()
+        if obj.type == 'MESH' and obj.data.is_editmode:
+            bm = bmesh.from_edit_mesh(obj.data)
+            if bm.select_mode != {'FACE'}:
+                raise NotImplementedError("compute_pivot_point needs face selection mode")
+            if bm.faces.active is not None:
+                pos = bm.faces.active.calc_center_median()
+            bm.free()
+        return pos
+
+    else:
+        raise NotImplementedError(f"compute_pivot_point does not support {pivot_mode} pivot mode")
 
 
 ###############################################################################
@@ -1779,29 +1898,17 @@ class NailMesh:
         only_selected = self.me.is_editmode and only_selected
         verts = set()
 
-        first_face = None
-        for face in self.bm.faces:
-            if only_selected and not face.select:
-                continue
-            first_face = face
-            break
-
-        # TODO: Is this still needed? Why?
-        if first_face is not None:
-            space = Matrix.Translation(-first_face.calc_center_median())
-            ispace = Matrix.Translation(first_face.calc_center_median())
-            mat = ispace @ mat @ space
-
+        # Separate out translation as required by locked_transform_one_face
         translation = mat.translation.xyz
-        mat_no_translation = mat.copy()
-        mat_no_translation.translation.xyz = 0
+        mat.translation.xyz = 0
 
         for face in self.bm.faces:
             if only_selected and not face.select:
                 continue
-            self.locked_transform_one_face(face, mat_no_translation, translation)
+            self.locked_transform_one_face(face, mat, translation)
             verts.update(face.verts)
 
+        mat.translation.xyz = translation # Put back translation
         bmesh.ops.transform(self.bm, matrix=mat, verts=list(verts))
 
     # Updates the texture shift, scale, and uv axes of the given face by the given
