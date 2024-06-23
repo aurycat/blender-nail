@@ -363,7 +363,7 @@ class NailPreferences(AddonPreferences):
     use_locked_transform_keymaps: bpy.props.BoolProperty(
         name="Use Texture-Locked Transform keymap overrides for G and R",
         description="If checked, Nail automatically replaces the G (grab/move) and R (rotate) edit-mode keymaps with Nail's locked-transform variants when a project containing a NailMesh is opened. These operators behave like normal G and R for non-NailMeshes. If unchecked, you can still access the locked-transform operators via the Nail menu",
-        default=False,
+        default=True,
         update=use_locked_transform_keymaps_updated)
 
     @classmethod
@@ -444,7 +444,11 @@ class AURYCAT_MT_nail_main_menu(bpy.types.Menu):
         # too off the rails! If somehow our menu is opened, surely the operator
         # should be cancelled.
         if AURYCAT_OT_nail_internal_modal_locked_transform.active is not None:
-            AURYCAT_OT_nail_internal_modal_locked_transform.active.cancelled = True
+            # Check for ReferenceError because 'active' may be non-None but an invalid/destroyed bpy_struct
+            try:
+                AURYCAT_OT_nail_internal_modal_locked_transform.active.cancelled = True
+            except ReferenceError:
+                AURYCAT_OT_nail_internal_modal_locked_transform.active = None
 
 
 ###############################################################################
@@ -467,6 +471,11 @@ def on_post_depsgraph_update(scene, depsgraph):
 
     # Don't live update while doing a locked transform
     if AURYCAT_OT_nail_internal_modal_locked_transform.active is not None:
+        # Check for invalid/destroyed bpy_struct by trying to access a property
+        try:
+            foo = AURYCAT_OT_nail_internal_modal_locked_transform.active.cancelled
+        except ReferenceError:
+            AURYCAT_OT_nail_internal_modal_locked_transform.active = None
         return
 
     # For ~0 update_interval, do the apply every depsgraph update
@@ -1078,14 +1087,17 @@ class AURYCAT_OT_nail_internal_modal_locked_transform(Operator):
         return self.execute(context)
 
     def execute(self, context):
-
-        if ( (AURYCAT_OT_nail_internal_modal_locked_transform.active is not None) and
-             not AURYCAT_OT_nail_internal_modal_locked_transform.active.cancelled ):
-            AURYCAT_OT_nail_internal_modal_locked_transform.active.cancelled = True
-            self.report({'ERROR'}, "Interactive texture-locked transform operator already running, cancelling both")
-            return {'CANCELLED'}
-
+        if AURYCAT_OT_nail_internal_modal_locked_transform.active is not None:
+            # Check for ReferenceError because 'active' may be non-None but an invalid/destroyed bpy_struct
+            try:
+                if not AURYCAT_OT_nail_internal_modal_locked_transform.active.cancelled:
+                    AURYCAT_OT_nail_internal_modal_locked_transform.active.cancelled = True
+                    self.report({'ERROR'}, "Interactive texture-locked transform operator already running, cancelling both")
+                    return {'CANCELLED'}
+            except ReferenceError:
+                pass
         AURYCAT_OT_nail_internal_modal_locked_transform.active = self
+
         self.cancelled = False
         self.finished = False
         self.saved_operator = context.active_operator
@@ -1129,6 +1141,8 @@ class AURYCAT_OT_nail_internal_modal_locked_transform(Operator):
             return {'PASS_THROUGH'}
 
         if context.active_operator is not self.saved_operator:
+            AURYCAT_OT_nail_internal_modal_locked_transform.active = None
+
             # context.active_operator would be better named "last_operator", as
             # it only gets set when an operator completes. So, once the underlying
             # transform operator finishes, active_operator will change, and we'll
@@ -1143,17 +1157,16 @@ class AURYCAT_OT_nail_internal_modal_locked_transform(Operator):
                     final_mode = "rotate"
                 elif op.bl_idname == "TRANSFORM_OT_resize":
                     final_mode = "scale"
-                elif op.bl_idname == "TRANSFORM_OT_edge_slide":
-                    # Edge slide can be reached via pressing 'g' again in move mode
-                    self.report({'ERROR'}, f"Edge slide is not suppoted for texture-locked transforms")
-                    return {'CANCELLED'}
                 else:
+                    # Could be vertex slide, edge slide, or trackball
+                    # Those can be accessed through the main translate/rotate
+                    # operators by double pressing G or double pressing R
+                    self.report({'ERROR'}, f"{op.name} is not suppoted for texture-locked transforms. No texture-locking was done.")
                     return {'CANCELLED'}
             else:
-                self.report({'ERROR'}, "Something went wrong when determining the transform operation")
+                self.report({'ERROR'}, "Something went wrong when determining the transform operation. No texture-locking was done.")
                 return {'CANCELLED'}
 
-            AURYCAT_OT_nail_internal_modal_locked_transform.active = None
             self.finalize_transform(context, op, final_mode)
             return {'FINISHED'}
 
@@ -1163,10 +1176,11 @@ class AURYCAT_OT_nail_internal_modal_locked_transform(Operator):
     def finalize_transform(self, context, op, final_mode):
         this_class_name = type(self).__name__
 
-        mat = op.properties.orient_matrix.copy()
-        mat_array = (mat[0][:] + mat[1][:] + mat[2][:])
-
-        args = {'modal_hack': True, 'orient_matrix': mat_array, 'orient_type': op.properties.orient_type}
+        args = {
+            'modal_hack': True,
+            'orient_matrix': op.properties.orient_matrix.copy(),
+            'orient_type': op.properties.orient_type
+        }
 
         if final_mode == "translate":
             underlying_op = "TRANSFORM_OT_translate"
@@ -1177,6 +1191,8 @@ class AURYCAT_OT_nail_internal_modal_locked_transform(Operator):
             finalize_op = AURYCAT_OT_nail_internal_end_locked_rotate.getop()
             args['value'] = op.properties.value
             args['orient_axis'] = op.properties.orient_axis
+            # See comment on 'inverted_value' property for explanation.
+            args['inverted_value'] = vec3_is_zero(Vector(op.properties.constraint_axis))
         elif final_mode == "scale":
             underlying_op = "TRANSFORM_OT_resize"
             finalize_op = AURYCAT_OT_nail_internal_end_locked_scale.getop()
@@ -1241,22 +1257,21 @@ class SharedFinalizeInteractiveTexLockedTransform:
 
     orient_matrix: bpy.props.FloatVectorProperty(
         name="Orient",
-        default=[0]*9,
         subtype='MATRIX',
-        size=9,
+        size=(3,3),
         options={'HIDDEN'})
 
     def execute(self, context):
         # Get the local transform of the transform op
-        mat = self.get_op_transform_matrix()
-        print("base mat")
-        print(mat)
+        op_transform = self.get_op_transform_matrix()
+        # print("base mat")
+        # print(mat)
 
         # # Convert that local transform to the orient space
         # # If transformation orientation is GLOBAL, this is a no-op (TODO wait maybe not if object isnt at origin)
         # orient = self.orient_matrix.to_4x4()
         # iorient = orient.inverted()
-        # mat = iorient @ self.get_op_transform_matrix() @ orient
+        # mat = iorient @ mat @ orient
         # print("orient mat")
         # print(orient)
         # print("oriented mat")
@@ -1279,10 +1294,86 @@ class SharedFinalizeInteractiveTexLockedTransform:
         # a NailMesh. Otherwise they use standard Blender transform operators.
         for obj in context.objects_in_mode:
             if obj.type == 'MESH':
+                # The orient matrix is just rotation, and it's always in world-space.
+                # E.g. GLOBAL orientation is always identity, LOCAL is the matrix_world
+                # of the object
+
+                # orient = self.orient_matrix.to_quaternion()
+                # rot_world = obj.matrix_world.to_quaternion()
+                # local_orient = rot_world.inverted() @ orient
+
+                world_to_object = obj.matrix_world
+                object_to_world = world_to_object.inverted()
+
+                world_orient = self.orient_matrix.to_4x4()
+                orient = object_to_world @ world_orient #world_to_object @ world_orient
+                orient = orient.to_quaternion().to_matrix().to_4x4()
+
+                pivot_point = compute_pivot_point()
+                local_pivot_point = object_to_world @ pivot_point
+                plus_lpivot = Matrix.Translation(local_pivot_point)
+                minus_lpivot = Matrix.Translation(-local_pivot_point)
+
+
+                mat = plus_lpivot @ orient @ op_transform @ orient.inverted() @ minus_lpivot
+
+                # minus_pivot = Matrix.Translation(-pivot_point)
+                # plus_pivot = Matrix.Translation(-pivot_point)
+
+                # the_mat = world_to_object @ plus_pivot @ transform_mat @ orient @ minus_pivot @ object_to_world
+
+                # print(orient)
+
+                # mat = object_to_world
+                # print("A", mat)
+                # mat = minus_pivot @ mat
+                # print("B", mat)
+                # mat = orient @ mat+
+                # print("C", mat)
+                # mat = transform_mat @ mat
+                # print("D", mat)
+                # mat = plus_pivot @ mat
+                # print("E", mat)
+                # mat = world_to_object @ mat
+                # print("F", mat)
+
+                # world_to_object @ plus_pivot @ transform @ orient @ minus_pivot @ object_to_world @ vert
+
+                # orient = self.orient_matrix.to_quaternion()
+                # rot_world = obj.matrix_world.to_quaternion()
+                # print("orient", orient)
+                # print("rot_world", rot_world)
+                # print("o @ r: ", (orient @ rot_world))
+                # print("r @ o: ", (rot_world @ orient))
+                # lorient = rot_world @ orient
+                # print("lorient")
+                # print(lorient)
+
+                # mlocal = mat.copy()
+                # # mlocal = obj.matrix_world @ mlocal
+                # print("mlocal mat")
+                # print(mlocal)
+
+                # # Convert that local transform to the orient space
+                # # If transformation orientation is GLOBAL, this is a no-op (TODO wait maybe not if object isnt at origin)
+                # orient = self.orient_matrix.to_4x4()
+                # orient = obj.matrix_world @ orient
+                # iorient = orient.inverted()
+                # mlocal = iorient @ mlocal @ orient
+                # print("orient mlocal")
+                # print(orient)
+                # print("oriented mlocal")
+                # print(mlocal)
+
+                # # Convert the transformation to be around the pivot point (except for translation)
+                # if self.uses_pivot_point:
+                #     pivot_point = compute_pivot_point()
+                #     pivot = Matrix.Translation(-pivot_point)
+                #     ipivot = Matrix.Translation(pivot_point)
+                #     mlocal = ipivot @ mlocal @ pivot
+
                 with NailMesh(obj) as nm: # (Turns mesh into NailMesh if not already)
-                    mlocal = mat.copy()
-                    # mlocal = obj.matrix_world.inverted() @ mlocal
-                    nm.locked_transform(mlocal)
+                    nm.locked_transform(mat)
 
         # This action may result in NailMeshes being created; may need wakeup
         nail_wake_if_needed()
@@ -1320,7 +1411,10 @@ class AURYCAT_OT_nail_internal_end_locked_translate(SharedFinalizeInteractiveTex
     value: bpy.props.FloatVectorProperty(
         name="Move", default=[0]*3, subtype='TRANSLATION')
     def get_op_transform_matrix(self):
-        return Matrix.Translation(self.value)
+        v = self.value
+        # I'm not sure why the value needs to be negated for 'VIEW' orientations
+        if self.orient_type == 'VIEW': v = -v
+        return Matrix.Translation(v)
 
 
 class AURYCAT_OT_nail_internal_end_locked_rotate(SharedFinalizeInteractiveTexLockedTransform, Operator):
@@ -1331,10 +1425,18 @@ class AURYCAT_OT_nail_internal_end_locked_rotate(SharedFinalizeInteractiveTexLoc
         name="Axis", items=[('X',"X","X"), ('Y',"Y","Y"), ('Z',"Z","Z")])
     value: bpy.props.FloatProperty(
         name="Angle", default=0, subtype='ANGLE')
+    # When rotating without any constraint axis specified (e.g. pressing
+    # R without then pressing X, Y, or Z), the axis is listed as Z, but
+    # it's actually the negative value compared to using VIEW orientation
+    # and pressing Z when rotating. Both show up with the same 'orient_axis'
+    # value being 'Z', but you can tell the difference by looking at the
+    # 'constraint_axis' property, which is (0,0,0) when an axis is not
+    # specificed explicitly.
+    inverted_value: bpy.props.BoolProperty(name="Inverted Value", options={'HIDDEN'})
     def get_op_transform_matrix(self):
         v = self.value
-        # I'm not sure why the value needs to be negated for 'VIEW' orientations
-        if self.orient_type == 'VIEW': v = -v
+        if self.inverted_value:
+            v = -v
         return Matrix.Rotation(v, 4, self.orient_axis)
 
 
@@ -1898,18 +2000,20 @@ class NailMesh:
         only_selected = self.me.is_editmode and only_selected
         verts = set()
 
-        # Separate out translation as required by locked_transform_one_face
-        translation = mat.translation.xyz
-        mat.translation.xyz = 0
+        # # Separate out translation as required by locked_transform_one_face
+        # translation = mat.translation.xyz
+        # mat.translation.xyz = 0
 
-        for face in self.bm.faces:
-            if only_selected and not face.select:
-                continue
-            self.locked_transform_one_face(face, mat, translation)
-            verts.update(face.verts)
+        # for face in self.bm.faces:
+        #     if only_selected and not face.select:
+        #         continue
+        #     self.locked_transform_one_face(face, mat, translation)
+        #     verts.update(face.verts)
 
-        mat.translation.xyz = translation # Put back translation
-        bmesh.ops.transform(self.bm, matrix=mat, verts=list(verts))
+        # mat.translation.xyz = translation # Put back translation
+        # print(mat)
+        # bmesh.ops.transform(self.bm, matrix=mat)#, verts=list(verts))
+        self.bm.transform(mat)
 
     # Updates the texture shift, scale, and uv axes of the given face by the given
     # transform matrix. The matrix must always be a world-space transformation.
