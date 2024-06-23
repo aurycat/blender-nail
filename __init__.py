@@ -1186,6 +1186,7 @@ class AURYCAT_OT_nail_internal_modal_locked_transform(Operator):
             underlying_op = "TRANSFORM_OT_translate"
             finalize_op = AURYCAT_OT_nail_internal_end_locked_translate.getop()
             args['value'] = op.properties.value.copy()
+            args['inverted_value'] = False #vec3_is_zero(Vector(op.properties.constraint_axis))
         elif final_mode == "rotate":
             underlying_op = "TRANSFORM_OT_rotate"
             finalize_op = AURYCAT_OT_nail_internal_end_locked_rotate.getop()
@@ -1264,25 +1265,6 @@ class SharedFinalizeInteractiveTexLockedTransform:
     def execute(self, context):
         # Get the local transform of the transform op
         op_transform = self.get_op_transform_matrix()
-        # print("base mat")
-        # print(mat)
-
-        # # Convert that local transform to the orient space
-        # # If transformation orientation is GLOBAL, this is a no-op (TODO wait maybe not if object isnt at origin)
-        # orient = self.orient_matrix.to_4x4()
-        # iorient = orient.inverted()
-        # mat = iorient @ mat @ orient
-        # print("orient mat")
-        # print(orient)
-        # print("oriented mat")
-        # print(mat)
-
-        # # Convert the transformation to be around the pivot point (except for translation)
-        # if self.uses_pivot_point:
-        #     pivot_point = compute_pivot_point()
-        #     pivot = Matrix.Translation(-pivot_point)
-        #     ipivot = Matrix.Translation(pivot_point)
-        #     mat = ipivot @ mat @ pivot
 
         # I think ideally this would only apply to existing NailMeshes, but
         # the operator still needs to actually move the faces even if they're
@@ -1298,79 +1280,18 @@ class SharedFinalizeInteractiveTexLockedTransform:
                 # E.g. GLOBAL orientation is always identity, LOCAL is the matrix_world
                 # of the object
 
-                # orient = self.orient_matrix.to_quaternion()
-                # rot_world = obj.matrix_world.to_quaternion()
-                # local_orient = rot_world.inverted() @ orient
-
-                world_to_object = obj.matrix_world
-                object_to_world = world_to_object.inverted()
+                world_to_object = obj.matrix_world.inverted()
 
                 world_orient = self.orient_matrix.to_4x4()
-                orient = object_to_world @ world_orient #world_to_object @ world_orient
+                orient = world_to_object @ world_orient
                 orient = orient.to_quaternion().to_matrix().to_4x4()
 
-                pivot_point = compute_pivot_point()
-                local_pivot_point = object_to_world @ pivot_point
-                plus_lpivot = Matrix.Translation(local_pivot_point)
-                minus_lpivot = Matrix.Translation(-local_pivot_point)
+                world_pivot_point = compute_pivot_point()
+                pivot_point = world_to_object @ world_pivot_point
+                plus_pivot = Matrix.Translation(pivot_point)
+                minus_pivot = Matrix.Translation(-pivot_point)
 
-
-                mat = plus_lpivot @ orient @ op_transform @ orient.inverted() @ minus_lpivot
-
-                # minus_pivot = Matrix.Translation(-pivot_point)
-                # plus_pivot = Matrix.Translation(-pivot_point)
-
-                # the_mat = world_to_object @ plus_pivot @ transform_mat @ orient @ minus_pivot @ object_to_world
-
-                # print(orient)
-
-                # mat = object_to_world
-                # print("A", mat)
-                # mat = minus_pivot @ mat
-                # print("B", mat)
-                # mat = orient @ mat+
-                # print("C", mat)
-                # mat = transform_mat @ mat
-                # print("D", mat)
-                # mat = plus_pivot @ mat
-                # print("E", mat)
-                # mat = world_to_object @ mat
-                # print("F", mat)
-
-                # world_to_object @ plus_pivot @ transform @ orient @ minus_pivot @ object_to_world @ vert
-
-                # orient = self.orient_matrix.to_quaternion()
-                # rot_world = obj.matrix_world.to_quaternion()
-                # print("orient", orient)
-                # print("rot_world", rot_world)
-                # print("o @ r: ", (orient @ rot_world))
-                # print("r @ o: ", (rot_world @ orient))
-                # lorient = rot_world @ orient
-                # print("lorient")
-                # print(lorient)
-
-                # mlocal = mat.copy()
-                # # mlocal = obj.matrix_world @ mlocal
-                # print("mlocal mat")
-                # print(mlocal)
-
-                # # Convert that local transform to the orient space
-                # # If transformation orientation is GLOBAL, this is a no-op (TODO wait maybe not if object isnt at origin)
-                # orient = self.orient_matrix.to_4x4()
-                # orient = obj.matrix_world @ orient
-                # iorient = orient.inverted()
-                # mlocal = iorient @ mlocal @ orient
-                # print("orient mlocal")
-                # print(orient)
-                # print("oriented mlocal")
-                # print(mlocal)
-
-                # # Convert the transformation to be around the pivot point (except for translation)
-                # if self.uses_pivot_point:
-                #     pivot_point = compute_pivot_point()
-                #     pivot = Matrix.Translation(-pivot_point)
-                #     ipivot = Matrix.Translation(pivot_point)
-                #     mlocal = ipivot @ mlocal @ pivot
+                mat = plus_pivot @ orient @ op_transform @ orient.inverted() @ minus_pivot
 
                 with NailMesh(obj) as nm: # (Turns mesh into NailMesh if not already)
                     nm.locked_transform(mat)
@@ -1410,10 +1331,13 @@ class AURYCAT_OT_nail_internal_end_locked_translate(SharedFinalizeInteractiveTex
     uses_pivot_point = False
     value: bpy.props.FloatVectorProperty(
         name="Move", default=[0]*3, subtype='TRANSLATION')
+    inverted_value: bpy.props.BoolProperty(name="Inverted Value", options={'HIDDEN'})
     def get_op_transform_matrix(self):
         v = self.value
-        # I'm not sure why the value needs to be negated for 'VIEW' orientations
-        if self.orient_type == 'VIEW': v = -v
+        # # I'm not sure why the value needs to be negated for 'VIEW' orientations
+        # if self.orient_type == 'VIEW': v = -v
+        if self.inverted_value:
+            v = -v
         return Matrix.Translation(v)
 
 
@@ -1633,7 +1557,7 @@ def check_pivot_point(self_or_cls, context, is_poll):
     return True
 
 # Computes the current pivot point using the active selection and pivot mode.
-# Only supports edit mode & face selection mode.
+# Only supports edit mode & face selection mode. Returns point in world-space.
 #
 # This needs to compute the pivot points in the same way that Blender does for
 # its transform operations, in order for the modal Texture-Locked Transform
@@ -1648,9 +1572,11 @@ def compute_pivot_point():
                 bm = bmesh.from_edit_mesh(obj.data)
                 if bm.select_mode != {'FACE'}:
                     raise NotImplementedError("compute_pivot_point needs face selection mode")
+                object_to_world = obj.matrix_world
                 for v in bm.verts:
                     if v.select:
-                        vert_coords.append(v.co.to_tuple())
+                        world_co = object_to_world @ v.co
+                        vert_coords.append(world_co.to_tuple())
                 bm.free()
         return vert_coords
 
@@ -1694,7 +1620,8 @@ def compute_pivot_point():
             if bm.select_mode != {'FACE'}:
                 raise NotImplementedError("compute_pivot_point needs face selection mode")
             if bm.faces.active is not None:
-                pos = bm.faces.active.calc_center_median()
+                object_to_world = obj.matrix_world
+                pos = object_to_world @ bm.faces.active.calc_center_median()
             bm.free()
         return pos
 
