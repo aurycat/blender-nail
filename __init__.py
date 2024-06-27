@@ -1965,6 +1965,7 @@ class NailMesh:
 
         mat.translation.xyz = translation # Put back translation
         bmesh.ops.transform(self.bm, matrix=mat, verts=list(verts))
+        print("actual new normal:", self.bm.faces.active.normal, "world:", self.rot_world @ self.bm.faces.active.normal)
         # self.bm.transform(mat)
 
     # Updates the texture shift, scale, and uv axes of the given face by the given
@@ -2018,8 +2019,19 @@ class NailMesh:
 
             # Update the cached face normal manually since the face hasn't actually
             # been transformed yet. (normal used by get_axis/face_aligned_uv_axes() )
-            f.normal = rs_mat @ f.normal
-            f.normal.normalize()
+            if f.world_space:
+                f.normal = world_rs_mat @ f.normal
+                f.normal.normalize()
+            else:
+                f.normal = self.rot_world.inverted().to_matrix().to_4x4() @ world_rs_mat @ (self.rot_world @ f.normal)
+            print("calculated new normal", f.normal)
+
+            # TODO: f.normal calculation here isn't right, it's not getting the same
+            # value as after the real transform
+            # Also, I think uaxis & vaxis currently need to always be in world-space,
+            # which might not be the best. Should probably store uaxis & vaxis in
+            # object space if face is object aligned. That probably explains why
+            # texture locked transform in object space isn't working right.
 
             flags = f.flags
 
