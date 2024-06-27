@@ -946,7 +946,7 @@ class AURYCAT_OT_nail_locked_transform(Operator):
         for obj in context.objects_in_mode:
             if obj.type == 'MESH':
                 with NailMesh(obj) as nm: # (Turns mesh into NailMesh if not already)
-                    nm.locked_transform(mat)
+                    nm.locked_transform(mat, obj.matrix_world @ mat)
 
         # This action may result in NailMeshes being created; may need wakeup
         nail_wake_if_needed()
@@ -1263,8 +1263,11 @@ class SharedFinalizeInteractiveTexLockedTransform:
         options={'HIDDEN'})
 
     def execute(self, context):
-        # Get the local transform of the transform op
+        # Get the local transform of the op
         op_transform = self.get_op_transform_matrix()
+
+        # And get the active pivot point, based on the current selection and pivot mode
+        world_pivot_point = compute_pivot_point()
 
         # I think ideally this would only apply to existing NailMeshes, but
         # the operator still needs to actually move the faces even if they're
@@ -1280,26 +1283,39 @@ class SharedFinalizeInteractiveTexLockedTransform:
                 # E.g. GLOBAL orientation is always identity, LOCAL is the matrix_world
                 # of the object
 
-                world_to_object = obj.matrix_world.inverted()
+                object_to_world = obj.matrix_world
+                world_to_object = object_to_world.inverted()
 
                 world_orient = self.orient_matrix.to_4x4()
-                orient = world_to_object @ world_orient
-                orient = orient.to_quaternion().to_matrix().to_4x4()
 
-                world_pivot_point = compute_pivot_point()
+                # Take the translation part out of orient, since that is handled by the pivot
+                orient = world_to_object @ world_orient
+                orient.translation.xyz = 0
+
                 pivot_point = world_to_object @ world_pivot_point
                 plus_pivot = Matrix.Translation(pivot_point)
                 minus_pivot = Matrix.Translation(-pivot_point)
 
+                # Compute the final object-space transform matrix for this transform.
+                # Applying this matrix to all the selected vertices of the mesh will
+                # (hopefully!) perform the exact same transformation that the underlying
+                # Blender op did during the modal part of AURYCAT_OT_nail_internal_modal_locked_transform
                 mat = plus_pivot @ orient @ op_transform @ orient.inverted() @ minus_pivot
 
+                world_plus_pivot = Matrix.Translation(world_pivot_point)
+                world_minus_pivot = Matrix.Translation(-world_pivot_point)
+                world_mat = world_plus_pivot @ world_orient @ op_transform @ world_orient.inverted() @ world_minus_pivot
+
+                print("mat", mat)
+                print("world_mat", world_mat)
+
                 with NailMesh(obj) as nm: # (Turns mesh into NailMesh if not already)
-                    nm.locked_transform(mat)
+                    nm.locked_transform(mat, world_mat)
 
         # This action may result in NailMeshes being created; may need wakeup
         nail_wake_if_needed()
 
-        if self.modal_hack:
+        if self.    modal_hack:
             self.modal_hack = False
             context.window_manager.modal_handler_add(self)
             return {'RUNNING_MODAL'}
@@ -1562,8 +1578,9 @@ def check_pivot_point(self_or_cls, context, is_poll):
 # This needs to compute the pivot points in the same way that Blender does for
 # its transform operations, in order for the modal Texture-Locked Transform
 # operators to work correctly.
-def compute_pivot_point():
-    pivot_mode = bpy.context.scene.tool_settings.transform_pivot_point
+def compute_pivot_point(pivot_mode = None):
+    if pivot_mode is None:
+        pivot_mode = bpy.context.scene.tool_settings.transform_pivot_point
 
     def get_selected_verts():
         vert_coords = []
@@ -1614,7 +1631,7 @@ def compute_pivot_point():
 
     elif pivot_mode == 'ACTIVE_ELEMENT':
         obj = bpy.context.active_object
-        pos = Vector()
+        pos = None
         if obj.type == 'MESH' and obj.data.is_editmode:
             bm = bmesh.from_edit_mesh(obj.data)
             if bm.select_mode != {'FACE'}:
@@ -1623,6 +1640,9 @@ def compute_pivot_point():
                 object_to_world = obj.matrix_world
                 pos = object_to_world @ bm.faces.active.calc_center_median()
             bm.free()
+        if pos is None:
+            # If there is no active face, Blender uses the median point
+            return compute_pivot_point(pivot_mode='MEDIAN_POINT')
         return pos
 
     else:
@@ -1922,40 +1942,53 @@ class NailMesh:
                 loop[uv_layer].uv += diff_coord0
 
     # Updates the texture shift, scale, and uv axes of selected faces by the given
-    # transform matrix. The matrix must always be a world-space transformation.
-    def locked_transform(self, mat, only_selected=True):
+    # transform matrix.
+    # mat is an object-space transformation matrix, and world_mat is the same
+    # transformation but in world-space. Note world_mat is NOT the same as just
+    # `obj.matrix_world @ mat`.
+    def locked_transform(self, mat, world_mat, only_selected=True):
         only_selected = self.me.is_editmode and only_selected
         verts = set()
 
-        # # Separate out translation as required by locked_transform_one_face
-        # translation = mat.translation.xyz
-        # mat.translation.xyz = 0
+        # Separate out translation as required by locked_transform_one_face
+        translation = mat.translation.xyz
+        mat.translation.xyz = 0
 
-        # for face in self.bm.faces:
-        #     if only_selected and not face.select:
-        #         continue
-        #     self.locked_transform_one_face(face, mat, translation)
-        #     verts.update(face.verts)
+        world_translation = world_mat.translation.xyz
+        world_mat.translation.xyz = 0
 
-        # mat.translation.xyz = translation # Put back translation
-        # print(mat)
-        # bmesh.ops.transform(self.bm, matrix=mat)#, verts=list(verts))
-        self.bm.transform(mat)
+        for face in self.bm.faces:
+            if only_selected and not face.select:
+                continue
+            self.locked_transform_one_face(face, translation, mat, world_translation, world_mat)
+            verts.update(face.verts) # Add face.verts to set
+
+        mat.translation.xyz = translation # Put back translation
+        bmesh.ops.transform(self.bm, matrix=mat, verts=list(verts))
+        # self.bm.transform(mat)
 
     # Updates the texture shift, scale, and uv axes of the given face by the given
-    # transform matrix. The matrix must always be a world-space transformation.
-    # The matrix must have its translation component zeroed out, and passed via
-    # the translation arg instead.
-    def locked_transform_one_face(self, face, mat, translation):
+    # transform matrix.
+    # The transformation is passed separately for object and world space
+    # (see header comment for locked_transform). Additionally, the transformation
+    # is passed separately for translation and rotation/scale
+    def locked_transform_one_face(self, face, obj_t_vec, obj_rs_mat, world_t_vec, world_rs_mat):
         f = self.unpack_face_data(face)
         if f is None:
             return
+
+        if f.world_space:
+            rs_mat = world_rs_mat
+            translation = world_t_vec
+        else:
+            rs_mat = obj_rs_mat
+            translation = obj_t_vec
 
         # Translation is passed separately, so if the matrix is identity it means
         # the transformation is translation-only. In that case we don't need to
         # calculate new uv axes, since they won't change, and consequently we don't
         # need to set the ALIGN_LOCKED flag
-        translation_only = mat.is_identity
+        translation_only = rs_mat.is_identity
 
         # Get the existing uv axes
         # Note these vectors are always normalized
@@ -1964,8 +1997,8 @@ class NailMesh:
         if not translation_only:
             # Rotate & scale the uv axes by the matrix. The new length of uaxis and
             # vaxis gives us a multiplication factor for the scale of the texture
-            uaxis = mat @ uaxis
-            vaxis = mat @ vaxis
+            uaxis = rs_mat @ uaxis
+            vaxis = rs_mat @ vaxis
 
             # Apply scale changes
             f.scale.x *= uaxis.length # These should be divided by the original u and vaxis
@@ -1985,7 +2018,8 @@ class NailMesh:
 
             # Update the cached face normal manually since the face hasn't actually
             # been transformed yet. (normal used by get_axis/face_aligned_uv_axes() )
-            f.normal = mat @ f.normal
+            f.normal = rs_mat @ f.normal
+            f.normal.normalize()
 
             flags = f.flags
 
