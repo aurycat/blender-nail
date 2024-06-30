@@ -118,8 +118,6 @@ def nail_classes():
 ###########################  Register / Unregister  ###########################
 ###############################################################################
 
-draw_handler = None
-
 def register():
 
     # Invoke unregister op on an existing "install" of the plugin before
@@ -162,8 +160,8 @@ def unregister():
     no_except(lambda: enable_post_depsgraph_update_handler(False))
     no_except(lambda: bpy.types.VIEW3D_PT_view3d_lock.remove(draw_lock_rotation))
     no_except(lambda: bpy.types.VIEW3D_MT_editor_menus.remove(nail_draw_main_menu))
-    no_except(lambda: bpy.types.SpaceView3D.draw_handler_remove(draw_handler, 'WINDOW'), silent=True)
     no_except(lambda: remove_keymaps())
+    disable_debug_draw()
     for cls in nail_classes():
         no_except(lambda: bpy.utils.unregister_class(cls))
 
@@ -247,7 +245,7 @@ def nail_wake_if_needed():
 
 
 def nail_wake():
-    global nail_is_awake, draw_handler
+    global nail_is_awake
 
     if nail_is_awake:
         return
@@ -255,14 +253,14 @@ def nail_wake():
     print("** Nail addon wake")
     nail_is_awake = True
 
-    draw_handler = bpy.types.SpaceView3D.draw_handler_add(debug_draw_3dview, (), 'WINDOW', 'POST_VIEW')
+    visualize_uv_axes_updated(None, None)
     auto_apply_updated(None, None)
     update_rate_updated(None, None)
     use_locked_transform_keymaps_updated(None, None)
 
 
 def nail_sleep():
-    global nail_is_awake, draw_handler
+    global nail_is_awake
 
     if not nail_is_awake:
         return
@@ -271,8 +269,8 @@ def nail_sleep():
     nail_is_awake = False
 
     no_except(lambda: enable_post_depsgraph_update_handler(False))
-    no_except(lambda: bpy.types.SpaceView3D.draw_handler_remove(draw_handler, 'WINDOW'), silent=True)
     no_except(lambda: remove_keymaps())
+    disable_debug_draw()
 
 
 class AURYCAT_OT_nail_sleep(Operator):
@@ -283,6 +281,101 @@ class AURYCAT_OT_nail_sleep(Operator):
     def execute(self, context):
         nail_sleep()
         return {'FINISHED'}
+
+
+###############################################################################
+################################  Preferences  ################################
+###############################################################################
+
+def auto_apply_updated(self, context):
+    enable_post_depsgraph_update_handler(nail_is_awake and NailPreferences.get('auto_apply'))
+
+
+def update_rate_updated(self, context):
+    on_post_depsgraph_update.update_interval = NailPreferences.get('update_rate')
+
+
+def use_locked_transform_keymaps_updated(self, context):
+    GR = NailPreferences.get('use_locked_transform_keymap_GR')
+    S = NailPreferences.get('use_locked_transform_keymap_S')
+    if nail_is_awake and (GR or S):
+        add_keymaps(GR, S)
+    else:
+        no_except(lambda: remove_keymaps())
+
+def visualize_uv_axes_updated(self, context):
+    if nail_is_awake and NailPreferences.get('debug_visualize_uv_axes'):
+        enable_debug_draw()
+    else:
+        disable_debug_draw()
+
+
+class NailPreferences(AddonPreferences):
+    bl_idname = PACKAGE_NAME
+
+    auto_apply: bpy.props.BoolProperty(
+        name="Auto-Apply Textures",
+        description="If checked, automatically applies a NailFaces' texture settings as they are moved or modified. While in edit mode, only applies to selected faces or their adjacent faces, for efficiency",
+        default=True,
+        update=auto_apply_updated)
+
+    update_rate: bpy.props.FloatProperty(
+        name="Update Rate",
+        description="How fast to auto-apply. Usually fine to leave at 0 seconds (Immediate), but for very large meshes or slower computers, it may be helpful to specify a slower update rate",
+        subtype='TIME_ABSOLUTE',
+        default=0, min=0, max=2,
+        update=update_rate_updated)
+
+    wrap_uvs: bpy.props.BoolProperty(
+        name="Wrap UVs",
+        description="If checked, each face's UV island is wrapped to be near (0,0) in UV space. Otherwise, UVs are projected literally from world-space coordinates, meaning the UVs can be very far from (0,0) if the face is far from the world origin",
+        default=True)
+
+    use_locked_transform_keymap_GR: bpy.props.BoolProperty(
+        name="Use Texture-Locked G & R Keymaps",
+        description="(Face selection mode only!)\nIf checked, Nail automatically replaces the G (grab/move) and R (rotate) edit-mode keymaps with Nail's locked-transform variants when a project containing a NailMesh is opened.\nThese operators behave like normal G and R for non-NailMeshes. If unchecked, you can still access the locked-transform operators via the Nail menu",
+        default=True,
+        update=use_locked_transform_keymaps_updated)
+
+    use_locked_transform_keymap_S: bpy.props.BoolProperty(
+        name="Use Texture-Locked S Keymap",
+        description="(Face selection mode only!)\nIf checked, Nail automatically replaces the S (scale) edit-mode keymaps with Nail's locked-transform variant when a project containing a NailMesh is opened.\nThis operator behaves like normal S for non-NailMeshes. If unchecked, you can still access the locked-transform operators via the Nail menu",
+        default=False,
+        update=use_locked_transform_keymaps_updated)
+
+    debug_visualize_uv_axes: bpy.props.BoolProperty(
+        name="Visualize UV Axes (Debug)",
+        description="Draw the UV axes of the most recently updated NailFace as vectors in the 3D view",
+        default=False,
+        update=visualize_uv_axes_updated)
+
+    @classmethod
+    def get(cls, name):
+        try:
+            return bpy.context.preferences.addons[PACKAGE_NAME].preferences[name]
+        except:
+            # Try to get the default value of the property
+            return cls.__annotations__[name].keywords['default']
+
+    def draw(self, context):
+        layout = self.layout
+        auto_apply = NailPreferences.get('auto_apply')
+        update_rate = NailPreferences.get('update_rate')
+
+        layout.use_property_split = False
+        layout.use_property_decorate = False
+
+        sp = layout.split()
+        sp.prop(self, 'auto_apply')
+        sp2 = sp.split()
+        sp2.enabled = auto_apply
+        nam = "Update Rate" + ("    (Immediate)" if update_rate == 0 and auto_apply else "")
+        sp2.prop(self, 'update_rate', text=nam)
+
+        layout.prop(self, 'wrap_uvs')
+        layout.prop(self, 'use_locked_transform_keymap_GR')
+        layout.prop(self, 'use_locked_transform_keymap_S')
+        layout.prop(self, 'debug_visualize_uv_axes')
 
 
 ###############################################################################
@@ -321,88 +414,6 @@ def remove_keymaps():
                 to_remove.append(kmi)
         for kmi in to_remove:
             km.keymap_items.remove(kmi)
-
-
-###############################################################################
-################################  Preferences  ################################
-###############################################################################
-
-def auto_apply_updated(self, context):
-    enable_post_depsgraph_update_handler(nail_is_awake and NailPreferences.get('auto_apply'))
-
-
-def update_rate_updated(self, context):
-    on_post_depsgraph_update.update_interval = NailPreferences.get('update_rate')
-
-
-def use_locked_transform_keymaps_updated(self, context):
-    GR = NailPreferences.get('use_locked_transform_keymap_GR')
-    S = NailPreferences.get('use_locked_transform_keymap_S')
-    if nail_is_awake and (GR or S):
-        add_keymaps(GR, S)
-    else:
-        no_except(lambda: remove_keymaps())
-
-
-class NailPreferences(AddonPreferences):
-    bl_idname = PACKAGE_NAME
-
-    auto_apply: bpy.props.BoolProperty(
-        name="Auto-Apply Textures",
-        description="If checked, automatically applies a NailFaces' texture settings as they are moved or modified. While in edit mode, only applies to selected faces or their adjacent faces, for efficiency",
-        default=True,
-        update=auto_apply_updated)
-
-    update_rate: bpy.props.FloatProperty(
-        name="Update Rate",
-        description="How fast to auto-apply. Usually fine to leave at 0 seconds (Immediate), but for very large meshes or slower computers, it may be helpful to specify a slower update rate",
-        subtype='TIME_ABSOLUTE',
-        default=0, min=0, max=2,
-        update=update_rate_updated)
-
-    wrap_uvs: bpy.props.BoolProperty(
-        name="Wrap UVs",
-        description="If checked, each face's UV island is wrapped to be near (0,0) in UV space. Otherwise, UVs are projected literally from world-space coordinates, meaning the UVs can be very far from (0,0) if the face is far from the world origin",
-        default=True)
-
-    use_locked_transform_keymap_GR: bpy.props.BoolProperty(
-        name="Use Texture-Locked G & R Keymaps",
-        description="(Face selection mode only!)\nIf checked, Nail automatically replaces the G (grab/move) and R (rotate) edit-mode keymaps with Nail's locked-transform variants when a project containing a NailMesh is opened.\nThese operators behave like normal G and R for non-NailMeshes. If unchecked, you can still access the locked-transform operators via the Nail menu",
-        default=True,
-        update=use_locked_transform_keymaps_updated)
-
-    use_locked_transform_keymap_S: bpy.props.BoolProperty(
-        name="Use Texture-Locked S Keymap",
-        description="(Face selection mode only!)\nIf checked, Nail automatically replaces the S (scale) edit-mode keymaps with Nail's locked-transform variant when a project containing a NailMesh is opened.\nThis operator behaves like normal S for non-NailMeshes. If unchecked, you can still access the locked-transform operators via the Nail menu",
-        default=False,
-        update=use_locked_transform_keymaps_updated)
-
-    @classmethod
-    def get(cls, name):
-        try:
-            return bpy.context.preferences.addons[PACKAGE_NAME].preferences[name]
-        except:
-            # Try to get the default value of the property
-            return cls.__annotations__[name].keywords['default']
-
-    def draw(self, context):
-        layout = self.layout
-        auto_apply = NailPreferences.get('auto_apply')
-        update_rate = NailPreferences.get('update_rate')
-
-        layout.use_property_split = False
-        layout.use_property_decorate = False
-
-        sp = layout.split()
-        sp.prop(self, 'auto_apply')
-        sp2 = sp.split()
-        sp2.enabled = auto_apply
-        nam = "Update Rate" + ("    (Immediate)" if update_rate == 0 and auto_apply else "")
-        sp2.prop(self, 'update_rate', text=nam)
-
-        layout.prop(self, 'wrap_uvs')
-        layout.prop(self, 'use_locked_transform_keymap_GR')
-        layout.prop(self, 'use_locked_transform_keymap_S')
 
 
 ###############################################################################
@@ -564,7 +575,7 @@ def do_auto_apply(obj):
 
 
 ###############################################################################
-#################################  Operators  #################################
+##############################  Main Operators  ###############################
 ###############################################################################
 
 def shared_poll(cls, context, only_face_select=False):
@@ -1334,11 +1345,11 @@ class SharedFinalizeInteractiveTexLockedTransform:
                 world_minus_pivot = Matrix.Translation(-world_pivot_point)
                 world_mat = world_plus_pivot @ world_orient @ op_transform @ world_orient.inverted() @ world_minus_pivot
 
-                print("mat", mat)
-                print("world_mat", world_mat)
-
                 with NailMesh(obj) as nm: # (Turns mesh into NailMesh if not already)
                     nm.locked_transform(mat, world_mat)
+
+        # Otherwise the old vectors will get shown in the same frame
+        reset_debug_vectors()
 
         # This action may result in NailMeshes being created; may need wakeup
         nail_wake_if_needed()
@@ -1416,270 +1427,6 @@ class AURYCAT_OT_nail_internal_end_locked_scale(SharedFinalizeInteractiveTexLock
         name="Scale", default=[0]*3, subtype='XYZ')
     def get_op_transform_matrix(self):
         return Matrix.Diagonal(self.value[:] + (1,))
-
-
-###############################################################################
-#################################   Utils   ###################################
-###############################################################################
-
-ORIENTATION_PX = 0  # +X
-ORIENTATION_PY = 1  # +Y
-ORIENTATION_PZ = 2  # +Z
-ORIENTATION_NX = 3  # -X
-ORIENTATION_NY = 4  # -Y
-ORIENTATION_NZ = 5  # -Z
-
-NORMAL_VECTORS = [
-    Vector((1,0,0)),  # +X
-    Vector((0,1,0)),  # +Y
-    Vector((0,0,1)),  # +Z
-    Vector((-1,0,0)), # -X
-    Vector((0,-1,0)), # -Y
-    Vector((0,0,-1)), # -Z
-]
-
-UP_VECTORS = [
-    Vector((0,0,1)), # +X
-    Vector((0,0,1)), # +Y
-    Vector((0,1,0)), # +Z
-    Vector((0,0,1)), # -X
-    Vector((0,0,1)), # -Y
-    Vector((0,1,0)), # -Z
-]
-
-RIGHT_VECTORS = [
-    Vector((0,-1,0)), # +X
-    Vector((-1,0,0)), # +Y
-    Vector((-1,0,0)), # +Z
-    Vector((0,-1,0)), # -X
-    Vector((-1,0,0)), # -Y
-    Vector((-1,0,0)), # -Z
-]
-
-def face_orientation(v):
-    ax, ay, az = abs(v.x), abs(v.y), abs(v.z)
-    if ax >= ay and ax >= az:
-        return ORIENTATION_PX if v.x >= 0 else ORIENTATION_NX
-    elif ay >= ax and ay >= az:
-        return ORIENTATION_PY if v.y >= 0 else ORIENTATION_NY
-    else:
-        return ORIENTATION_PZ if v.z >= 0 else ORIENTATION_NZ
-
-# For a normalized 3D vector, the largest of the values is the axis to which the
-# vector is most closely pointing, the dominant axis. The other two axes, the
-# nondominant axes, represent the XY, XZ, or YZ plane for which the dominant axis
-# is that plane's normal.
-# This returns a tuple of the dominant axis index, followed by the two non dominant
-# axis indices.
-def dominant_axis(v):
-    ax, ay, az = abs(v[0]), abs(v[1]), abs(v[2])
-    if ax >= ay and ax >= az:
-        return (0, 1, 2)
-    elif ay >= ax and ay >= az:
-        return (1, 0, 2)
-    else:
-        return (2, 0, 1)
-
-def dominant_axis_vec(dax):
-    return Vector((1 if dax == 0 else 0,
-                   1 if dax == 1 else 0,
-                   1 if dax == 2 else 0))
-
-# Project 3D Vector 'point' onto the plane made of normalized 3D Vector 'normal'
-# and 3D Vector 'origin'. Returns the closest point on the plane (the projection)
-# as a 3D Vector in the same coordinate system.
-def project_point_onto_plane(point, normal, origin):
-    return point - (normal.dot(point - origin))*normal
-
-def isclose(a, b):
-    return math.isclose(a, b, abs_tol=1e-5)
-
-def vec3_isclose(a, b):
-    return isclose(a.x, b.x) and isclose(a.y, b.y) and isclose(a.z, b.z)
-
-def vec3_is_zero(v):
-    return isclose(v.x, 0) and isclose(v.y, 0) and isclose(v.z, 0)
-
-# https://developer.download.nvidia.com/cg/frac.html
-# The output is always in the range  0 <= out < 1 .
-# Negative values are wrapped around, for example,
-#    frac( 0.2) = 0.2
-#    frac(-0.2) = 0.8
-def frac(f):
-    return f - math.floor(f)
-
-# Like frac but returns values in the range -1 < out < 1 . In particular, if
-# the result has the same sign as the input. This can result in slightly more
-# human-friendly shift values.
-#    frag_n1to1( 0.2) =  0.2
-#    frag_n1to1(-0.2) = -0.2
-#    frag_n1to1(-1.2) = -0.2
-def frac_n1to1(f):
-    x = frac(math.fabs(f))
-    # Copies sign of f onto value of x. The '+ 0' forces a negative zero
-    # to be converted to normal positive zero.
-    return math.copysign(x, f) + 0
-
-def repr_flags(f):
-    return f"{f:04b}" if f is not None else "None"
-
-def set_or_apply_selected_faces(tc, context, set=False, apply=False, only_nailmeshes=False):
-    for obj in context.objects_in_mode:
-        if only_nailmeshes:
-            # Only apply to existing NailMeshes
-            ok = NailMesh.is_nail_object(obj)
-        else:
-            # Apply to all meshes in editmode (turns them into NailMeshes if not already)
-            ok = (obj.type == 'MESH')
-
-        if ok:
-            with NailMesh(obj) as nm:
-                if set:
-                    nm.set_texture_config(tc)
-                if apply:
-                    nm.apply_texture()
-
-def mesh_has_any_selected_faces(me): # must be in editmode
-    bm = bmesh.from_edit_mesh(me)
-    try:
-        if bm.faces.active is not None and bm.faces.active.select:
-            return True
-        for face in bm.faces:
-            if face.select:
-                return True
-    finally:
-        bm.free()
-    return False
-
-def flag_is_set(a, b):
-    return (a & b) == b
-
-def flag_set(a, b):
-    return a | b
-
-def flag_clear(a, b):
-    return a & ~b
-
-# Report error when not in an operator
-def async_report_error(msg):
-    def draw(self, _):
-        self.layout.label(text=msg)
-    bpy.context.window_manager.popup_menu(draw, title="Report: Error", icon='ERROR')
-
-def set_handler_enabled(handler_list, func, enable):
-    if enable:
-        if func not in handler_list:
-            handler_list.append(func)
-    else:
-        if func in handler_list:
-            handler_list.remove(func)
-
-def no_except(func, silent=False):
-    try:
-        func()
-    except Exception as e:
-        if not silent:
-            print("Error in Nail addon:")
-            print(traceback.format_exc())
-
-# Used as operator poll to validate the context before compute_pivot_point can be called
-#
-# Note! For a GLOBAL transformation orientation, using Individual Origins for translations
-# is fine, the axis/axes will be the same for all parts. But for other orientations, e.g.
-# NORMAL, then the axes will be different for different parts. So, just to be safe, always
-# prohibit Individual Origins even for translation.
-def check_pivot_point(self_or_cls, context, is_poll):
-    if context.scene.tool_settings.transform_pivot_point == 'INDIVIDUAL_ORIGINS':
-        msg = "'Individual Origins' pivot point mode is not supported for modal Nail Texture-Locked Transforms. Please pick a different pivot mode, or disable / don't use Texture-Locked Transform."
-        if (not is_poll) and (NailPreferences.get('use_locked_transform_keymap_GR') or NailPreferences.get('use_locked_transform_keymap_S')):
-            msg += "\n(Note Nail keymap overrides can be disabled in Nail addon menu!)"
-        if is_poll:
-            self_or_cls.poll_message_set(msg)
-        else:
-            self_or_cls.report({'ERROR'}, msg)
-        return False
-    return True
-
-# Computes the current pivot point using the active selection and pivot mode.
-# Only supports edit mode & face selection mode. Returns point in world-space.
-#
-# This needs to compute the pivot points in the same way that Blender does for
-# its transform operations, in order for the modal Texture-Locked Transform
-# operators to work correctly.
-def compute_pivot_point(pivot_mode = None):
-    if pivot_mode is None:
-        pivot_mode = bpy.context.scene.tool_settings.transform_pivot_point
-
-    def get_selected_verts():
-        vert_coords = []
-        for obj in bpy.context.objects_in_mode:
-            if obj.type == 'MESH' and obj.data.is_editmode:
-                bm = bmesh.from_edit_mesh(obj.data)
-                if bm.select_mode != {'FACE'}:
-                    raise NotImplementedError("compute_pivot_point needs face selection mode")
-                object_to_world = obj.matrix_world
-                for v in bm.verts:
-                    if v.select:
-                        world_co = object_to_world @ v.co
-                        vert_coords.append(world_co.to_tuple())
-                bm.free()
-        return vert_coords
-
-    if pivot_mode == 'BOUNDING_BOX_CENTER':
-        vert_coords = get_selected_verts()
-        if len(vert_coords) == 0:
-            return Vector()
-        mn = numpy.amin(vert_coords, axis=0)
-        mx = numpy.amax(vert_coords, axis=0)
-        bb_center = numpy.mean([mn, mx], axis=0)
-        return Vector(bb_center)
-
-    elif pivot_mode == 'CURSOR':
-        return bpy.context.scene.cursor.location
-
-    elif pivot_mode == 'INDIVIDUAL_ORIGINS':
-        # Not supported because there will be multiple pivot points.
-        # Also Blender groups connected faces together as "individuals"
-        # and determining which sets of faces are connected sounds slow.
-        # .. and also I don't feel like it.
-        raise NotImplementedError("compute_pivot_point does not support Individual Origins pivot mode")
-
-    elif pivot_mode == 'MEDIAN_POINT':
-        vert_coords = get_selected_verts()
-        if len(vert_coords) == 0:
-            return Vector()
-        # Blender calls it 'Median', but its really just the mean/average position
-        # of the vertices. Also it's based on vertices even in face selection mode.
-        #
-        # Surprisingly numpy.mean is a tad slower than just adding together all the
-        # v.co Vectors together and dividing by the total, but that can get significant
-        # precision loss if there's a lot of verts. numpy.mean has better precision.
-        median_point = numpy.mean(vert_coords, axis=0)
-        return Vector(median_point)
-
-    elif pivot_mode == 'ACTIVE_ELEMENT':
-        obj = bpy.context.active_object
-        pos = None
-        if obj.type == 'MESH' and obj.data.is_editmode:
-            bm = bmesh.from_edit_mesh(obj.data)
-            if bm.select_mode != {'FACE'}:
-                raise NotImplementedError("compute_pivot_point needs face selection mode")
-            if bm.faces.active is not None:
-                object_to_world = obj.matrix_world
-                pos = object_to_world @ bm.faces.active.calc_center_median()
-            bm.free()
-        if pos is None:
-            # If there is no active face, Blender uses the median point
-            return compute_pivot_point(pivot_mode='MEDIAN_POINT')
-        return pos
-
-    else:
-        raise NotImplementedError(f"compute_pivot_point does not support {pivot_mode} pivot mode")
-
-def conditionally_enabled_prop(layout, owner, propname, enabled):
-    s = layout.split()
-    s.enabled = enabled
-    s.prop(owner, propname)
 
 
 ###############################################################################
@@ -1952,6 +1699,18 @@ class NailMesh:
 
         uaxis, vaxis = self.get_face_uv_axes(f)
 
+        if draw_handler is not None:
+            # Doing debug draw UV axes
+            center = face.calc_center_median()
+            debug_uaxis = uaxis
+            debug_vaxis = vaxis
+            if f.world_space:
+                center = self.matrix_world @ center
+                debug_uaxis = self.rot_world @ uaxis
+                debug_vaxis = self.rot_world @ vaxis
+            debug_draw_vec(center, debug_uaxis, Vector((1,0,0)))
+            debug_draw_vec(center, debug_vaxis, Vector((0,1,0)))
+
         rotation_mat = Matrix.Rotation(f.rotation, 2)
         uv_layer = self.uv_layer
 
@@ -2182,13 +1941,282 @@ class NailMesh:
         return f
 
 
-import bpy
+###############################################################################
+#################################   Utils   ###################################
+###############################################################################
+
+ORIENTATION_PX = 0  # +X
+ORIENTATION_PY = 1  # +Y
+ORIENTATION_PZ = 2  # +Z
+ORIENTATION_NX = 3  # -X
+ORIENTATION_NY = 4  # -Y
+ORIENTATION_NZ = 5  # -Z
+
+NORMAL_VECTORS = [
+    Vector((1,0,0)),  # +X
+    Vector((0,1,0)),  # +Y
+    Vector((0,0,1)),  # +Z
+    Vector((-1,0,0)), # -X
+    Vector((0,-1,0)), # -Y
+    Vector((0,0,-1)), # -Z
+]
+
+UP_VECTORS = [
+    Vector((0,0,1)), # +X
+    Vector((0,0,1)), # +Y
+    Vector((0,1,0)), # +Z
+    Vector((0,0,1)), # -X
+    Vector((0,0,1)), # -Y
+    Vector((0,1,0)), # -Z
+]
+
+RIGHT_VECTORS = [
+    Vector((0,-1,0)), # +X
+    Vector((-1,0,0)), # +Y
+    Vector((-1,0,0)), # +Z
+    Vector((0,-1,0)), # -X
+    Vector((-1,0,0)), # -Y
+    Vector((-1,0,0)), # -Z
+]
+
+def face_orientation(v):
+    ax, ay, az = abs(v.x), abs(v.y), abs(v.z)
+    if ax >= ay and ax >= az:
+        return ORIENTATION_PX if v.x >= 0 else ORIENTATION_NX
+    elif ay >= ax and ay >= az:
+        return ORIENTATION_PY if v.y >= 0 else ORIENTATION_NY
+    else:
+        return ORIENTATION_PZ if v.z >= 0 else ORIENTATION_NZ
+
+# For a normalized 3D vector, the largest of the values is the axis to which the
+# vector is most closely pointing, the dominant axis. The other two axes, the
+# nondominant axes, represent the XY, XZ, or YZ plane for which the dominant axis
+# is that plane's normal.
+# This returns a tuple of the dominant axis index, followed by the two non dominant
+# axis indices.
+def dominant_axis(v):
+    ax, ay, az = abs(v[0]), abs(v[1]), abs(v[2])
+    if ax >= ay and ax >= az:
+        return (0, 1, 2)
+    elif ay >= ax and ay >= az:
+        return (1, 0, 2)
+    else:
+        return (2, 0, 1)
+
+def dominant_axis_vec(dax):
+    return Vector((1 if dax == 0 else 0,
+                   1 if dax == 1 else 0,
+                   1 if dax == 2 else 0))
+
+# Project 3D Vector 'point' onto the plane made of normalized 3D Vector 'normal'
+# and 3D Vector 'origin'. Returns the closest point on the plane (the projection)
+# as a 3D Vector in the same coordinate system.
+def project_point_onto_plane(point, normal, origin):
+    return point - (normal.dot(point - origin))*normal
+
+def isclose(a, b):
+    return math.isclose(a, b, abs_tol=1e-5)
+
+def vec3_isclose(a, b):
+    return isclose(a.x, b.x) and isclose(a.y, b.y) and isclose(a.z, b.z)
+
+def vec3_is_zero(v):
+    return isclose(v.x, 0) and isclose(v.y, 0) and isclose(v.z, 0)
+
+# https://developer.download.nvidia.com/cg/frac.html
+# The output is always in the range  0 <= out < 1 .
+# Negative values are wrapped around, for example,
+#    frac( 0.2) = 0.2
+#    frac(-0.2) = 0.8
+def frac(f):
+    return f - math.floor(f)
+
+# Like frac but returns values in the range -1 < out < 1 . In particular, if
+# the result has the same sign as the input. This can result in slightly more
+# human-friendly shift values.
+#    frag_n1to1( 0.2) =  0.2
+#    frag_n1to1(-0.2) = -0.2
+#    frag_n1to1(-1.2) = -0.2
+def frac_n1to1(f):
+    x = frac(math.fabs(f))
+    # Copies sign of f onto value of x. The '+ 0' forces a negative zero
+    # to be converted to normal positive zero.
+    return math.copysign(x, f) + 0
+
+def repr_flags(f):
+    return f"{f:04b}" if f is not None else "None"
+
+def set_or_apply_selected_faces(tc, context, set=False, apply=False, only_nailmeshes=False):
+    for obj in context.objects_in_mode:
+        if only_nailmeshes:
+            # Only apply to existing NailMeshes
+            ok = NailMesh.is_nail_object(obj)
+        else:
+            # Apply to all meshes in editmode (turns them into NailMeshes if not already)
+            ok = (obj.type == 'MESH')
+
+        if ok:
+            with NailMesh(obj) as nm:
+                if set:
+                    nm.set_texture_config(tc)
+                if apply:
+                    nm.apply_texture()
+
+def mesh_has_any_selected_faces(me): # must be in editmode
+    bm = bmesh.from_edit_mesh(me)
+    try:
+        if bm.faces.active is not None and bm.faces.active.select:
+            return True
+        for face in bm.faces:
+            if face.select:
+                return True
+    finally:
+        bm.free()
+    return False
+
+def flag_is_set(a, b):
+    return (a & b) == b
+
+def flag_set(a, b):
+    return a | b
+
+def flag_clear(a, b):
+    return a & ~b
+
+# Report error when not in an operator
+def async_report_error(msg):
+    def draw(self, _):
+        self.layout.label(text=msg)
+    bpy.context.window_manager.popup_menu(draw, title="Report: Error", icon='ERROR')
+
+def set_handler_enabled(handler_list, func, enable):
+    if enable:
+        if func not in handler_list:
+            handler_list.append(func)
+    else:
+        if func in handler_list:
+            handler_list.remove(func)
+
+def no_except(func, silent=False):
+    try:
+        func()
+    except Exception as e:
+        if not silent:
+            print("Error in Nail addon:")
+            print(traceback.format_exc())
+
+# Used as operator poll to validate the context before compute_pivot_point can be called
+#
+# Note! For a GLOBAL transformation orientation, using Individual Origins for translations
+# is fine, the axis/axes will be the same for all parts. But for other orientations, e.g.
+# NORMAL, then the axes will be different for different parts. So, just to be safe, always
+# prohibit Individual Origins even for translation.
+def check_pivot_point(self_or_cls, context, is_poll):
+    if context.scene.tool_settings.transform_pivot_point == 'INDIVIDUAL_ORIGINS':
+        msg = "'Individual Origins' pivot point mode is not supported for modal Nail Texture-Locked Transforms. Please pick a different pivot mode, or disable / don't use Texture-Locked Transform."
+        if (not is_poll) and (NailPreferences.get('use_locked_transform_keymap_GR') or NailPreferences.get('use_locked_transform_keymap_S')):
+            msg += "\n(Note Nail keymap overrides can be disabled in Nail addon menu!)"
+        if is_poll:
+            self_or_cls.poll_message_set(msg)
+        else:
+            self_or_cls.report({'ERROR'}, msg)
+        return False
+    return True
+
+# Computes the current pivot point using the active selection and pivot mode.
+# Only supports edit mode & face selection mode. Returns point in world-space.
+#
+# This needs to compute the pivot points in the same way that Blender does for
+# its transform operations, in order for the modal Texture-Locked Transform
+# operators to work correctly.
+def compute_pivot_point(pivot_mode = None):
+    if pivot_mode is None:
+        pivot_mode = bpy.context.scene.tool_settings.transform_pivot_point
+
+    def get_selected_verts():
+        vert_coords = []
+        for obj in bpy.context.objects_in_mode:
+            if obj.type == 'MESH' and obj.data.is_editmode:
+                bm = bmesh.from_edit_mesh(obj.data)
+                if bm.select_mode != {'FACE'}:
+                    raise NotImplementedError("compute_pivot_point needs face selection mode")
+                object_to_world = obj.matrix_world
+                for v in bm.verts:
+                    if v.select:
+                        world_co = object_to_world @ v.co
+                        vert_coords.append(world_co.to_tuple())
+                bm.free()
+        return vert_coords
+
+    if pivot_mode == 'BOUNDING_BOX_CENTER':
+        vert_coords = get_selected_verts()
+        if len(vert_coords) == 0:
+            return Vector()
+        mn = numpy.amin(vert_coords, axis=0)
+        mx = numpy.amax(vert_coords, axis=0)
+        bb_center = numpy.mean([mn, mx], axis=0)
+        return Vector(bb_center)
+
+    elif pivot_mode == 'CURSOR':
+        return bpy.context.scene.cursor.location
+
+    elif pivot_mode == 'INDIVIDUAL_ORIGINS':
+        # Not supported because there will be multiple pivot points.
+        # Also Blender groups connected faces together as "individuals"
+        # and determining which sets of faces are connected sounds slow.
+        # .. and also I don't feel like it.
+        raise NotImplementedError("compute_pivot_point does not support Individual Origins pivot mode")
+
+    elif pivot_mode == 'MEDIAN_POINT':
+        vert_coords = get_selected_verts()
+        if len(vert_coords) == 0:
+            return Vector()
+        # Blender calls it 'Median', but its really just the mean/average position
+        # of the vertices. Also it's based on vertices even in face selection mode.
+        #
+        # Surprisingly numpy.mean is a tad slower than just adding together all the
+        # v.co Vectors together and dividing by the total, but that can get significant
+        # precision loss if there's a lot of verts. numpy.mean has better precision.
+        median_point = numpy.mean(vert_coords, axis=0)
+        return Vector(median_point)
+
+    elif pivot_mode == 'ACTIVE_ELEMENT':
+        obj = bpy.context.active_object
+        pos = None
+        if obj.type == 'MESH' and obj.data.is_editmode:
+            bm = bmesh.from_edit_mesh(obj.data)
+            if bm.select_mode != {'FACE'}:
+                raise NotImplementedError("compute_pivot_point needs face selection mode")
+            if bm.faces.active is not None:
+                object_to_world = obj.matrix_world
+                pos = object_to_world @ bm.faces.active.calc_center_median()
+            bm.free()
+        if pos is None:
+            # If there is no active face, Blender uses the median point
+            return compute_pivot_point(pivot_mode='MEDIAN_POINT')
+        return pos
+
+    else:
+        raise NotImplementedError(f"compute_pivot_point does not support {pivot_mode} pivot mode")
+
+def conditionally_enabled_prop(layout, owner, propname, enabled):
+    s = layout.split()
+    s.enabled = enabled
+    s.prop(owner, propname)
+
+
+###############################################################################
+############################   Debug Draw Vectors   ###########################
+###############################################################################
+
 import gpu
 from gpu_extras.batch import batch_for_shader
 
+draw_handler = None
 coords = []
 coords_color = []
 shader = gpu.shader.from_builtin('FLAT_COLOR')
+batch = None
 
 did_draw = False
 vec_changed = False
@@ -2199,14 +2227,19 @@ def find_orthogonal(v):
     r -= r.dot(v) * v
     return r.normalized()
 
-def draw_vec(origin, direction, color):
+def debug_draw_vec(origin, direction, color):
     global coords, coords_color
     global did_draw
     global vec_changed
+
+    # Queue up all the vectors drawn in a single frame. Once a frame is
+    # actually drawn (debug_draw_3dview is called), the next vector to
+    # be drawn first clears the list of vectors drawn. That way, drawing
+    # vectors on one frame only lets them persist for a while, until
+    # another newer vector needs to be drawn.
     if did_draw:
-        coords = []
-        coords_color = []
-        did_draw = False
+        reset_debug_vectors()
+
     vec_changed = True
     o = origin.to_3d()
     d = direction.to_3d()
@@ -2240,7 +2273,6 @@ def draw_vec(origin, direction, color):
     c = color
     coords_color.extend([c,c, c,c, c,c, c,c, c,c])
 
-
 def debug_draw_3dview():
     global did_draw
     global coords, coords_color
@@ -2255,161 +2287,30 @@ def debug_draw_3dview():
     batch.draw(shader)
     did_draw = True
 
+def reset_debug_vectors():
+    global coords, coords_color, did_draw, vec_changed, batch
+    coords = []
+    coords_color = []
+    did_draw = False
+    vec_changed = False
+    batch = None
+
+def enable_debug_draw():
+    global draw_handler
+    disable_debug_draw()
+    draw_handler = bpy.types.SpaceView3D.draw_handler_add(debug_draw_3dview, (), 'WINDOW', 'POST_VIEW')
+
+def disable_debug_draw():
+    global draw_handler
+    reset_debug_vectors()
+    if draw_handler is not None:
+        no_except(lambda: bpy.types.SpaceView3D.draw_handler_remove(draw_handler, 'WINDOW'), silent=True)
+        draw_handler = None
+
+
+###############################################################################
+###############################   Script Init   ###############################
+###############################################################################
 
 if RUNNING_AS_SCRIPT:
     register()
-
-
-
-#tan_len, bitan_len, fiiiirst, M1 = 0, 0, False, None
-
-
-
-#    def lock(self, only_selected=True):
-#        only_selected = self.me.is_editmode and only_selected
-#        for face in self.bm.faces:
-#            if only_selected and not face.select:
-#                continue
-#        self.lock_face(face)
-
-#    def unlock(self, only_selected=True):
-#        only_selected = self.me.is_editmode and only_selected
-#        for face in self.bm.faces:
-#            if only_selected and not face.select:
-#                continue
-#            self.unlock_face(face)
-
-#    def lock_face(self, face):
-#        f = self.unpack_face_data(face)
-#        if f is None or f.lock_axis:
-#            return
-
-#    def unlock_face(self, face):
-#        f = self.unpack_face_data(face)
-#        if f is None or f.lock_axis:
-#            return
-
-
-
-#        f.transform_attr = rot_mat @ f.transform_attr
-#        row = f.transform_attr.row
-#        face[self.transform_r1_layer] = row[0]
-#        face[self.transform_r2_layer] = row[1]
-#        face[self.transform_r3_layer] = row[2]
-
-#        self.face_offset_texture(face, f, moveDelta, uaxis, vaxis)
-
-#        f.axis_rot_attr.xyzw = rotateAngles[:]
-##        return
-
-#        bIsLocking = True
-#        bIsMoving = moveDelta.length_squared > 0.00001
-
-#        normal = face.normal
-#        normal = f.transform_attr.to_quaternion() @ normal
-#        if f.world_space:
-#            normal = self.rot_world @ normal
-
-#        uaxis, vaxis = self.calc_uvaxes(Vector((0,0,1)), False)
-#        tq = f.transform_attr.to_quaternion()
-#        uaxis = tq @ uaxis
-#        vaxis = tq @ vaxis
-
-#        uaxis, vaxis = self.calc_uvaxes(normal, f.align_face)
-
-##        if mat.is_identity:
-#        print(f.shift_flags_attr.xy)
-#            return
-
-#        fscaleU = uaxis.length
-#        fscaleV = vaxis.length
-#        if isclose(fscaleU, 0): fscaleU = 1
-#        if isclose(fscaleV, 0): fscaleV = 1
-
-#        vU = mat @ uaxis
-#        vV = mat @ vaxis
-
-#        bUVAxisSameScale = isclose(fscaleU, 1) and isclose(fscaleV, 1)
-#        bUVAxisPerpendicular = math.isclose(vU.dot(vV), 0, abs_tol=0.0025)
-
-#        if bUVAxisPerpendicular:
-#            uaxis = vU / fscaleU
-#            vaxis = vV / fscaleV
-
-#        if not bUVAxisSameScale: # we stretch / scale axes
-
-
-
-#    def generate_face_axes(self, face, f):
-#        global tan_len, bitan_len, fiiiirst, M1
-#        center = face.calc_center_median()
-#        vert0 = face.verts[0].co
-#        vert1 = face.verts[1].co
-#        normal = face.normal
-#        if f.world_space:
-#            normal = self.rot_world @ normal
-#            center = self.matrix_world @ center
-#            vert0 = self.matrix_world @ vert0
-#            vert1 = self.matrix_world @ vert1
-#        tangent = vert0 - center
-#        tangent2 = vert1 - center
-#        bitangent = normal.cross(tangent.normalized())
-##        draw_vec(center, normal, (0,0,1))
-##        draw_vec(center, tangent, (0,1,0))
-##        draw_vec(center, tangent2, (0,1,0))
-##        draw_vec(center, bitangent, (0,0,1))
-#        bitangent = tangent2.project(bitangent)
-##        draw_vec(center, bitangent, (1,0,0))
-
-#        M2 = Matrix([(tangent.x,tangent.y,tangent.z,0),
-#                     (bitangent.x,bitangent.y,bitangent.z,0),
-#                     (normal.x,normal.y,normal.z,0),
-#                     (0,0,0,1)])
-
-#        if not fiiiirst:
-#            tan_len = tangent.length
-#            bitan_len = bitangent.length
-#            fiiiirst = True
-#            M1 = M2
-#        else:
-#            M_diff = M1.inverted() @ M2
-#            M_diff.invert()
-##            print(M_diff)
-#            #print(tangent.length/tan_len, " --- ", bitangent.length/bitan_len)
-
-#            up = Vector((0,0,1))
-#            left = Vector((1,0,0))
-#            forward = Vector((0,1,0))
-#            up = M_diff @ up
-#            left = M_diff @ left
-#            forward = M_diff @ forward
-#            origin = Vector((0,0,0))
-#            draw_vec(origin, up, (0,0,1))
-#            draw_vec(origin, left, (1,0,0))
-#            draw_vec(origin, forward, (0,1,0))
-
-
-
-        # get center, vert0, vert1, normal
-        # tangent = vert0-center
-        # tangent2 = vert1-center
-        # bitangent = normal.cross(tangent.normalized())
-        # bitangent scaled by the projection of tangent2 onto bitangent
-        # make a transformation matrix M1
-        #   n0 n1 n2 0    # or something like this idk
-        #   t0 t1 t2 0
-        #   b0 b1 b2 0
-        #   0  0  0  1
-        # repeat that process for the end, get M2
-        # M2 = M? @ M1
-        # M2 @ M1-1 = M? @ M1 @ M1-1
-        # M2 @ M1-1 = M?
-
-#        M2 = M? @ M1
-#        M2 @ M1^-1 = M? @ M1 @ M1^-1
-#        M2 @ M1^-1 = M? @ (M1 @ M1^-1)
-#        M2 @ M1^-1 = M?
-        
-
-        # M? = M1^-1 @ M2
-        # M? = M2^-1 @ M1
