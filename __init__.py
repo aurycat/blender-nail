@@ -1728,11 +1728,11 @@ class NailMesh:
 
         if draw_handler is not None:
             # Doing debug draw UV axes
-            center = face.calc_center_median()
+            # Always draw in world space
+            center = self.matrix_world @ face.calc_center_median()
             debug_uaxis = uaxis
             debug_vaxis = vaxis
-            if f.world_space:
-                center = self.matrix_world @ center
+            if not f.world_space:
                 debug_uaxis = self.rot_world @ uaxis
                 debug_vaxis = self.rot_world @ vaxis
             debug_draw_vec(center, debug_uaxis, Vector((1,0,0)))
