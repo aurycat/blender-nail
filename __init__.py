@@ -106,6 +106,7 @@ def nail_classes():
         AURYCAT_OT_nail_modal_locked_scale,
         AURYCAT_OT_nail_keybind_modal_locked_translate,
         AURYCAT_OT_nail_keybind_modal_locked_rotate,
+        AURYCAT_OT_nail_keybind_modal_locked_scale,
         AURYCAT_OT_nail_internal_modal_locked_transform,
         AURYCAT_OT_nail_internal_end_locked_translate,
         AURYCAT_OT_nail_internal_end_locked_rotate,
@@ -292,10 +293,11 @@ def keymapped_ops():
     return [
         {'idname': AURYCAT_OT_nail_keybind_modal_locked_translate.bl_idname, 'type': 'G', 'value': 'PRESS'},
         {'idname': AURYCAT_OT_nail_keybind_modal_locked_rotate.bl_idname, 'type': 'R', 'value': 'PRESS'},
+        {'idname': AURYCAT_OT_nail_keybind_modal_locked_scale.bl_idname, 'type': 'S', 'value': 'PRESS'},
     ]
 
 
-def add_keymaps():
+def add_keymaps(GR, S):
     remove_keymaps()
     wm = bpy.context.window_manager
     kc = wm.keyconfigs.addon
@@ -303,7 +305,8 @@ def add_keymaps():
         # Calling 'new' here only makes a new keymap if one doesn't already exist
         km = kc.keymaps.new(name='Mesh', space_type='EMPTY')
         for op in keymapped_ops():
-            km.keymap_items.new(**op)
+            if (GR and (op['type'] == 'G' or op['type'] == 'R')) or (S and op['type'] == 'S'):
+                km.keymap_items.new(**op)
 
 
 def remove_keymaps():
@@ -333,8 +336,10 @@ def update_rate_updated(self, context):
 
 
 def use_locked_transform_keymaps_updated(self, context):
-    if nail_is_awake and NailPreferences.get('use_locked_transform_keymaps'):
-        add_keymaps()
+    GR = NailPreferences.get('use_locked_transform_keymap_GR')
+    S = NailPreferences.get('use_locked_transform_keymap_S')
+    if nail_is_awake and (GR or S):
+        add_keymaps(GR, S)
     else:
         no_except(lambda: remove_keymaps())
 
@@ -360,10 +365,16 @@ class NailPreferences(AddonPreferences):
         description="If checked, each face's UV island is wrapped to be near (0,0) in UV space. Otherwise, UVs are projected literally from world-space coordinates, meaning the UVs can be very far from (0,0) if the face is far from the world origin",
         default=True)
 
-    use_locked_transform_keymaps: bpy.props.BoolProperty(
-        name="Use Texture-Locked Transform keymap overrides for G and R",
-        description="If checked, Nail automatically replaces the G (grab/move) and R (rotate) edit-mode keymaps with Nail's locked-transform variants when a project containing a NailMesh is opened. These operators behave like normal G and R for non-NailMeshes. If unchecked, you can still access the locked-transform operators via the Nail menu",
+    use_locked_transform_keymap_GR: bpy.props.BoolProperty(
+        name="Use Texture-Locked G & R Keymaps",
+        description="(Face selection mode only!)\nIf checked, Nail automatically replaces the G (grab/move) and R (rotate) edit-mode keymaps with Nail's locked-transform variants when a project containing a NailMesh is opened.\nThese operators behave like normal G and R for non-NailMeshes. If unchecked, you can still access the locked-transform operators via the Nail menu",
         default=True,
+        update=use_locked_transform_keymaps_updated)
+
+    use_locked_transform_keymap_S: bpy.props.BoolProperty(
+        name="Use Texture-Locked S Keymap",
+        description="(Face selection mode only!)\nIf checked, Nail automatically replaces the S (scale) edit-mode keymaps with Nail's locked-transform variant when a project containing a NailMesh is opened.\nThis operator behaves like normal S for non-NailMeshes. If unchecked, you can still access the locked-transform operators via the Nail menu",
+        default=False,
         update=use_locked_transform_keymaps_updated)
 
     @classmethod
@@ -390,7 +401,8 @@ class NailPreferences(AddonPreferences):
         sp2.prop(self, 'update_rate', text=nam)
 
         layout.prop(self, 'wrap_uvs')
-        layout.prop(self, 'use_locked_transform_keymaps')
+        layout.prop(self, 'use_locked_transform_keymap_GR')
+        layout.prop(self, 'use_locked_transform_keymap_S')
 
 
 ###############################################################################
@@ -433,9 +445,12 @@ class AURYCAT_MT_nail_main_menu(bpy.types.Menu):
         layout.operator(AURYCAT_OT_nail_modal_locked_rotate.bl_idname)
         layout.operator(AURYCAT_OT_nail_modal_locked_scale.bl_idname)
         layout.operator(AURYCAT_OT_nail_locked_transform.bl_idname, text="Texture-Locked Transform (Noninteractive)")
+        prefs = bpy.context.preferences.addons[PACKAGE_NAME].preferences
+        layout.prop(prefs, 'use_locked_transform_keymap_GR')
+        layout.prop(prefs, 'use_locked_transform_keymap_S')
 
         layout.separator()
-        layout.operator("preferences.addon_show", text="Preferences")
+        layout.operator("preferences.addon_show", text="Preferences").module = PACKAGE_NAME
         # When running from Blender script editor show unregister button for convenience
         if RUNNING_AS_SCRIPT:
             layout.operator(AURYCAT_OT_nail_unregister.bl_idname)
@@ -684,30 +699,25 @@ class AURYCAT_OT_nail_edit_texture_config(Operator):
         layout.use_property_split = True
         layout.use_property_decorate = False
 
-        def conditionally_enabled_prop(propname, enabled):
-            s = layout.split()
-            s.enabled = enabled
-            s.prop(self, propname)
-
         if 'shift' in cls.differing_values:
             if not self.set_shift:
                 layout.label(text="Selected faces have differing shift values")
             layout.prop(self, 'set_shift')
-        conditionally_enabled_prop('shift', self.set_shift)
+        conditionally_enabled_prop(layout, self, 'shift', self.set_shift)
 
         layout.separator()
         if 'scale' in cls.differing_values:
             if not self.set_scale:
                 layout.label(text="Selected faces have differing scale values")
             layout.prop(self, 'set_scale')
-        conditionally_enabled_prop('scale', self.set_scale)
+        conditionally_enabled_prop(layout, self, 'scale', self.set_scale)
 
         layout.separator()
         if 'rotation' in cls.differing_values:
             if not self.set_rotation:
                 layout.label(text="Selected faces have differing rotation values")
             layout.prop(self, 'set_rotation')
-        conditionally_enabled_prop('rotation', self.set_rotation)
+        conditionally_enabled_prop(layout, self, 'rotation', self.set_rotation)
 
         layout.separator()
         layout.separator()
@@ -854,7 +864,7 @@ class AURYCAT_OT_nail_reapply_texture_config(Operator):
     bl_idname = "aurycat.nail_reapply_texture_config"
     bl_label = "Reapply Texture"
     bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Reapply the existing texture shift, scale, rotation, and alignment of the selected NailFaces.\nUseful to run this after moving or modifying faces, but rarely needed when Auto-Apply Textures is enabled"
+    bl_description = "(Rarely needed when Auto-Apply Textures is enabled!)\nReapply the existing texture shift, scale, rotation, and alignment of the selected NailFaces.\nRun this after moving or modifying faces"
 
     @classmethod
     def poll(cls, context):
@@ -961,6 +971,9 @@ class AURYCAT_OT_nail_locked_transform(Operator):
 #------------------------------------------------------------------------------
 # User-facing operators for menus
 
+def locked_transform_poll(cls, context):
+    return shared_poll(cls, context, only_face_select=True) and check_pivot_point(cls, context, True)
+
 class AURYCAT_OT_nail_modal_locked_translate(Operator):
     bl_idname = "aurycat.nail_modal_locked_translate"
     bl_label = "Texture-Locked Move"
@@ -968,7 +981,7 @@ class AURYCAT_OT_nail_modal_locked_translate(Operator):
     bl_description = "Move selected faces, adjusting their NailFace shift & scale to keep the texture in the same relative position"
     @classmethod
     def poll(cls, context):
-        return shared_poll(cls, context, only_face_select=True) and check_pivot_point(cls, context, True)
+        return locked_transform_poll(cls, context)
     def execute(self, context):
         AURYCAT_OT_nail_internal_modal_locked_transform.getop()('INVOKE_DEFAULT', mode='move')
         return {'FINISHED'}
@@ -981,7 +994,7 @@ class AURYCAT_OT_nail_modal_locked_rotate(Operator):
     bl_description = "Rotate selected faces, adjusting their NailFace shift, scale, and UV axis to keep the texture in the same relative position"
     @classmethod
     def poll(cls, context):
-        return shared_poll(cls, context, only_face_select=True) and check_pivot_point(cls, context, True)
+        return locked_transform_poll(cls, context)
     def execute(self, context):
         AURYCAT_OT_nail_internal_modal_locked_transform.getop()('INVOKE_DEFAULT', mode='rotate')
         return {'FINISHED'}
@@ -994,7 +1007,7 @@ class AURYCAT_OT_nail_modal_locked_scale(Operator):
     bl_description = "Scale selected faces, adjusting their NailFace shift, scale, and UV axis to keep the texture in the same relative position. Note that scaling operations which shear the mesh will not correctly preserve the texture"
     @classmethod
     def poll(cls, context):
-        return shared_poll(cls, context, only_face_select=True) and check_pivot_point(cls, context, True)
+        return locked_transform_poll(cls, context)
     def execute(self, context):
         AURYCAT_OT_nail_internal_modal_locked_transform.getop()('INVOKE_DEFAULT', mode='scale')
         return {'FINISHED'}
@@ -1002,7 +1015,6 @@ class AURYCAT_OT_nail_modal_locked_scale(Operator):
 
 #------------------------------------------------------------------------------
 # Optional user-facing operators for keybinds
-# (No 'keybind' version for locked-scale, since it's not common to want that)
 
 def keybind_poll(context):
     if not shared_poll(None, context, only_face_select=True):
@@ -1031,7 +1043,7 @@ class AURYCAT_OT_nail_keybind_modal_locked_translate(Operator):
 
 
 # Use this for keybinds.
-# It acts like regular rotate when Nail Locked Translate is not applicable
+# It acts like regular rotate when Nail Locked Rotate is not applicable
 class AURYCAT_OT_nail_keybind_modal_locked_rotate(Operator):
     bl_idname = "aurycat.nail_keybind_modal_locked_rotate"
     bl_label = "Nail Texture-Locked Rotate (for Keybind)"
@@ -1043,6 +1055,22 @@ class AURYCAT_OT_nail_keybind_modal_locked_rotate(Operator):
             return {'CANCELLED'}
         else:
             AURYCAT_OT_nail_internal_modal_locked_transform.getop()(mode='rotate')
+        return {'FINISHED'}
+
+
+# Use this for keybinds.
+# It acts like regular scale when Nail Locked Scale is not applicable
+class AURYCAT_OT_nail_keybind_modal_locked_scale(Operator):
+    bl_idname = "aurycat.nail_keybind_modal_locked_scale"
+    bl_label = "Nail Texture-Locked Scale (for Keybind)"
+    bl_options = {"REGISTER"}
+    def execute(self, context):
+        if not keybind_poll(context):
+            bpy.ops.transform.rotate('INVOKE_DEFAULT')
+        elif not check_pivot_point(self, context, False):
+            return {'CANCELLED'}
+        else:
+            AURYCAT_OT_nail_internal_modal_locked_transform.getop()(mode='scale')
         return {'FINISHED'}
 
 
@@ -1563,8 +1591,8 @@ def no_except(func, silent=False):
 def check_pivot_point(self_or_cls, context, is_poll):
     if context.scene.tool_settings.transform_pivot_point == 'INDIVIDUAL_ORIGINS':
         msg = "'Individual Origins' pivot point mode is not supported for modal Nail Texture-Locked Transforms. Please pick a different pivot mode, or disable / don't use Texture-Locked Transform."
-        if (not is_poll) and NailPreferences.get('use_locked_transform_keymaps'):
-            msg += "\n(Note Nail G and R keymap overrides can be disabled in Nail addon preferences!)"
+        if (not is_poll) and (NailPreferences.get('use_locked_transform_keymap_GR') or NailPreferences.get('use_locked_transform_keymap_S')):
+            msg += "\n(Note Nail keymap overrides can be disabled in Nail addon menu!)"
         if is_poll:
             self_or_cls.poll_message_set(msg)
         else:
@@ -1647,6 +1675,11 @@ def compute_pivot_point(pivot_mode = None):
 
     else:
         raise NotImplementedError(f"compute_pivot_point does not support {pivot_mode} pivot mode")
+
+def conditionally_enabled_prop(layout, owner, propname, enabled):
+    s = layout.split()
+    s.enabled = enabled
+    s.prop(owner, propname)
 
 
 ###############################################################################
@@ -1941,49 +1974,60 @@ class NailMesh:
             for loop in face.loops:
                 loop[uv_layer].uv += diff_coord0
 
-    # Updates the texture shift, scale, and uv axes of selected faces by the given
-    # transform matrix.
-    # mat is an object-space transformation matrix, and world_mat is the same
+    # Transforms the mesh and updates the texture shift, scale, and UV axes of the
+    # moved by the same transformation so that the UVs shift with the mesh.
+    #
+    # obj_mat is an object-space transformation matrix, and world_mat is the same
     # transformation but in world-space. Note world_mat is NOT the same as just
     # `obj.matrix_world @ mat`.
-    def locked_transform(self, mat, world_mat, only_selected=True):
-        only_selected = self.me.is_editmode and only_selected
-        verts = set()
+    def locked_transform(self, obj_mat, world_mat, only_selected=True):
+        all_faces = not (self.me.is_editmode and only_selected)
+
+        # Should already be in face selection mode due to operator poll, this is just an assert
+        if self.bm.select_mode != {'FACE'}:
+            raise RuntimeError("Mesh must be in face selection mode to use locked_transform()")
+
+        # In order to calculate the UV axis transformation, need to know the
+        # normal prior to transform. But for part of the calculation we also
+        # need to know the new normal; easiest way is to save previous normals
+        # and do the mesh transform before doing UV axis transform.
+        saved_normals = [face.normal.copy() for face in self.bm.faces if (all_faces or face.select)]
+
+        # Apply transformation to selected faces
+        self.bm.transform(obj_mat, filter={'SELECT'})
+
+        # Sometimes needed after modifying verts in order to access the data correctly again
+        self.bm.faces.ensure_lookup_table()
 
         # Separate out translation as required by locked_transform_one_face
-        translation = mat.translation.xyz
-        mat.translation.xyz = 0
-
+        obj_translation = obj_mat.translation.xyz
+        obj_mat.translation.xyz = 0
         world_translation = world_mat.translation.xyz
         world_mat.translation.xyz = 0
 
+        i = 0
         for face in self.bm.faces:
-            if only_selected and not face.select:
-                continue
-            self.locked_transform_one_face(face, translation, mat, world_translation, world_mat)
-            verts.update(face.verts) # Add face.verts to set
+            if all_faces or face.select:
+                self.locked_transform_one_face(face, obj_translation, obj_mat, world_translation, world_mat, saved_normals[i])
+                i += 1
 
-        mat.translation.xyz = translation # Put back translation
-        bmesh.ops.transform(self.bm, matrix=mat, verts=list(verts))
-        print("actual new normal:", self.bm.faces.active.normal, "world:", self.rot_world @ self.bm.faces.active.normal)
-        # self.bm.transform(mat)
-
-    # Updates the texture shift, scale, and uv axes of the given face by the given
-    # transform matrix.
-    # The transformation is passed separately for object and world space
-    # (see header comment for locked_transform). Additionally, the transformation
-    # is passed separately for translation and rotation/scale
-    def locked_transform_one_face(self, face, obj_t_vec, obj_rs_mat, world_t_vec, world_rs_mat):
+    # See header for locked_transform
+    def locked_transform_one_face(self, face, obj_translation, obj_rs_mat, world_translation, world_rs_mat, saved_normal):
         f = self.unpack_face_data(face)
         if f is None:
             return
 
         if f.world_space:
             rs_mat = world_rs_mat
-            translation = world_t_vec
+            translation = world_translation
+            saved_normal = self.rot_world @ saved_normal
         else:
             rs_mat = obj_rs_mat
-            translation = obj_t_vec
+            translation = obj_translation
+
+        # Initially use old normal for finding existing uvaxes
+        new_normal = f.normal # Already in obj or world space, depending on f.world_space
+        f.normal = saved_normal
 
         # Translation is passed separately, so if the matrix is identity it means
         # the transformation is translation-only. In that case we don't need to
@@ -2016,27 +2060,14 @@ class NailMesh:
             # if a face is rotated 90 degrees, for example. If so, we can switch to
             # Axis or Face alignment instead, which makes future texture projection
             # more likely to do "what the user expects"(TM).
-
-            # Update the cached face normal manually since the face hasn't actually
-            # been transformed yet. (normal used by get_axis/face_aligned_uv_axes() )
-            if f.world_space:
-                f.normal = world_rs_mat @ f.normal
-                f.normal.normalize()
-            else:
-                f.normal = self.rot_world.inverted().to_matrix().to_4x4() @ world_rs_mat @ (self.rot_world @ f.normal)
-            print("calculated new normal", f.normal)
-
-            # TODO: f.normal calculation here isn't right, it's not getting the same
-            # value as after the real transform
-            # Also, I think uaxis & vaxis currently need to always be in world-space,
-            # which might not be the best. Should probably store uaxis & vaxis in
-            # object space if face is object aligned. That probably explains why
-            # texture locked transform in object space isn't working right.
+            #
+            # Calculate UV axes again in axis & face modes, using the new face normal
+            # (post- object transform being applied).
+            f.normal = new_normal
 
             flags = f.flags
-
             aa_uaxis, aa_vaxis = self.get_axis_aligned_uv_axes(f)
-            if vec3_isclose(uaxis, aa_uaxis) and vec3_isclose(vaxis, aa_vaxis): #uaxis == aa_uaxis and vaxis == aa_vaxis:
+            if vec3_isclose(uaxis, aa_uaxis) and vec3_isclose(vaxis, aa_vaxis):
                 # Great news, the new axes are the same as axis-aligned mode! Switch to that
                 flags = flag_clear(flags, TCFLAG_ALIGN_LOCKED)
                 flags = flag_clear(flags, TCFLAG_ALIGN_FACE)
