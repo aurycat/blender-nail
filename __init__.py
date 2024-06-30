@@ -893,17 +893,38 @@ class AURYCAT_OT_nail_copy_active_to_selected(Operator):
     bl_options = {"REGISTER", "UNDO"}
     bl_description = "Copies the texture shift, scale, rotation, and alignment of the active selected NailFace to all other selected NailFaces"
 
+    copy_uv_axes: bpy.props.BoolProperty(
+        name="Copy UV Axes",
+        default=False)
+
     @classmethod
     def poll(cls, context):
         return shared_poll(cls, context)
 
     def execute(self, context):
-        tc, errmsg = TextureConfig.from_active_face()
+        tc, errmsg = TextureConfig.from_active_face(calc_uv_axes=self.copy_uv_axes)
         if errmsg != None:
             self.report({'ERROR'}, errmsg)
             return {'CANCELLED'}
 
-        tc.flags_set &= ~TCFLAG_ENABLED # Don't change enabled state
+        flags = tc.flags
+        flags_set = tc.flags_set
+
+        flags_set = clear_flag(flags_set, TCFLAG_ENABLED) # Don't change enabled state
+
+        if self.copy_uv_axes:
+            flags_set = set_flag(flags_set, TCFLAG_ALIGN_LOCKED)
+            flags_set = set_flag(flags_set, TCFLAG_ALIGN_FACE)
+
+            flags = set_flag(flags, TCFLAG_ALIGN_LOCKED)
+            flags = clear_flag(flags, TCFLAG_ALIGN_FACE)
+        else:
+            tc.uaxis = None
+            tc.vaxis = None
+
+        tc.flags = flags
+        tc.flags_set = flags_set
+
         set_or_apply_selected_faces(tc, context, set=True, apply=True, only_nailmeshes=True)
         return {'FINISHED'}
 
@@ -1483,7 +1504,7 @@ class TextureConfig:
 
     # Returns (tc, None) or (None, error_message_str)
     @classmethod
-    def from_active_face(cls):
+    def from_active_face(cls, calc_uv_axes=False):
         active = bpy.context.active_object
         if active is None or active.type != 'MESH' or not active.data.is_editmode:
             return None, "No active mesh in edit mode"
@@ -1493,7 +1514,7 @@ class TextureConfig:
             if nm.bm.faces.active is None or not nm.bm.faces.active.select:
                 return None, "No active selected face"
             tc = TextureConfig.new_unset()
-            if not nm.get_texture_config_one_face(nm.bm.faces.active, tc):
+            if not nm.get_texture_config_one_face(nm.bm.faces.active, tc, calc_uv_axes):
                 return None, "Active face is not a NailFace"
             return tc, None
 
@@ -1598,10 +1619,12 @@ class NailMesh:
             scale_rot_attr.xy = tc.scale
         if tc.rotation is not None:
             scale_rot_attr.z = tc.rotation
-        if tc.uaxis is not None:
-            face[self.lock_uaxis_layer] = tc.uaxis
-        if tc.vaxis is not None:
-            face[self.lock_vaxis_layer] = tc.vaxis
+
+        # Used by Copy Active to Selected when 'Copy UV Axes' is checked
+        if tc.uaxis is not None and tc.vaxis is not None:
+            f = self.unpack_face_data(face, calc_normal=True)
+            if f is not None:
+                self.set_face_uv_axes(f, tc.uaxis, tc.vaxis)
 
     # tc is an in-out parameter
     # Pass in a blank TextureConfig to start with, multiple objects can
@@ -1617,8 +1640,8 @@ class NailMesh:
 
     # tc is an in-out parameter
     # Returns True if the face has Nail enabled, False otherwise (tc not modified)
-    def get_texture_config_one_face(self, face, tc):
-        f = self.unpack_face_data(face, calc_normal=False)
+    def get_texture_config_one_face(self, face, tc, calc_uv_axes=False):
+        f = self.unpack_face_data(face, calc_normal=calc_uv_axes)
         if f is None:
             return False
 
@@ -1653,6 +1676,10 @@ class NailMesh:
             tc.rotation = f.rotation
             tc.uaxis = f.lock_uaxis_attr
             tc.vaxis = f.lock_vaxis_attr
+            if calc_uv_axes and not f.align_locked:
+                # If align_locked is True, uaxis and vaxis will already be valid.
+                # Otherwise, they will be garbage, and we need to compute something valid
+                tc.uaxis, tc.vaxis = self.get_face_uv_axes(f)
 
         return True
 
@@ -1823,29 +1850,7 @@ class NailMesh:
             # Calculate UV axes again in axis & face modes, using the new face normal
             # (post- object transform being applied).
             f.normal = new_normal
-
-            flags = f.flags
-            aa_uaxis, aa_vaxis = self.get_axis_aligned_uv_axes(f)
-            if vec3_isclose(uaxis, aa_uaxis) and vec3_isclose(vaxis, aa_vaxis):
-                # Great news, the new axes are the same as axis-aligned mode! Switch to that
-                flags = flag_clear(flags, TCFLAG_ALIGN_LOCKED)
-                flags = flag_clear(flags, TCFLAG_ALIGN_FACE)
-            else:
-                fa_uaxis, fa_vaxis = self.get_face_aligned_uv_axes(f)
-                if vec3_isclose(uaxis, fa_uaxis) and vec3_isclose(vaxis, fa_vaxis):
-                    # Same as face-aligned mode, slightly less great but still nice
-                    flags = flag_clear(flags, TCFLAG_ALIGN_LOCKED)
-                    flags = flag_set(flags, TCFLAG_ALIGN_FACE)
-                else:
-                    # Ok need to use locked axes :(
-                    flags = flag_set(flags, TCFLAG_ALIGN_LOCKED)
-                    flags = flag_clear(flags, TCFLAG_ALIGN_FACE)
-                    # Save updated UV axes
-                    f.lock_uaxis_attr.xyz = uaxis
-                    f.lock_vaxis_attr.xyz = vaxis
-
-            # Save updated flags
-            f.shift_flags_attr.z = flags
+            self.set_face_uv_axes(f, uaxis, vaxis)
 
         # Compute the new texture shift value by projecting the translation
         # onto the new UV axes.
@@ -1855,6 +1860,33 @@ class NailMesh:
         f.shift.y = frac_n1to1(f.shift.y)
         # Save updated shift value
         f.shift_flags_attr.xy = f.shift
+
+    # Sets a face's UV axes to the arguments, and sets the face to ALIGN_LOCKED.
+    # Except, if the given UV axes match what would already be calculated as the
+    # face's axis-aligned or face-aligned UV axes, it switches to that mode instead.
+    def set_face_uv_axes(self, f, uaxis, vaxis):
+        flags = f.flags
+        aa_uaxis, aa_vaxis = self.get_axis_aligned_uv_axes(f)
+        if vec3_isclose(uaxis, aa_uaxis) and vec3_isclose(vaxis, aa_vaxis):
+            # Great news, the new axes are the same as axis-aligned mode! Switch to that
+            flags = clear_flag(flags, TCFLAG_ALIGN_LOCKED)
+            flags = clear_flag(flags, TCFLAG_ALIGN_FACE)
+        else:
+            fa_uaxis, fa_vaxis = self.get_face_aligned_uv_axes(f)
+            if vec3_isclose(uaxis, fa_uaxis) and vec3_isclose(vaxis, fa_vaxis):
+                # Same as face-aligned mode, slightly less great but still nice
+                flags = clear_flag(flags, TCFLAG_ALIGN_LOCKED)
+                flags = set_flag(flags, TCFLAG_ALIGN_FACE)
+            else:
+                # Ok need to use locked axes :(
+                flags = set_flag(flags, TCFLAG_ALIGN_LOCKED)
+                flags = clear_flag(flags, TCFLAG_ALIGN_FACE)
+                # Save updated UV axes
+                f.lock_uaxis_attr.xyz = uaxis
+                f.lock_vaxis_attr.xyz = vaxis
+
+        # Save updated flags
+        f.shift_flags_attr.z = flags
 
     # Expects f.normal to be set (unpack_face_data calc_normal=True)
     def get_face_uv_axes(self, f):
@@ -2077,10 +2109,10 @@ def mesh_has_any_selected_faces(me): # must be in editmode
 def flag_is_set(a, b):
     return (a & b) == b
 
-def flag_set(a, b):
+def set_flag(a, b):
     return a | b
 
-def flag_clear(a, b):
+def clear_flag(a, b):
     return a & ~b
 
 # Report error when not in an operator
