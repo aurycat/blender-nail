@@ -495,14 +495,13 @@ def on_post_depsgraph_update(scene, depsgraph):
         self.timer_ran = False
         return
 
-    # Don't live update while doing a locked transform
+    # Check for invalid/destroyed bpy_struct in .active by trying to access a property
+    # If found, clear .active to None
     if AURYCAT_OT_nail_internal_modal_locked_transform.active is not None:
-        # Check for invalid/destroyed bpy_struct by trying to access a property
         try:
             foo = AURYCAT_OT_nail_internal_modal_locked_transform.active.cancelled
         except ReferenceError:
             AURYCAT_OT_nail_internal_modal_locked_transform.active = None
-        return
 
     # For ~0 update_interval, do the apply every depsgraph update
     if self.update_interval < 0.04:
@@ -1375,7 +1374,7 @@ class SharedFinalizeInteractiveTexLockedTransform:
         # This action may result in NailMeshes being created; may need wakeup
         nail_wake_if_needed()
 
-        if self.    modal_hack:
+        if self.modal_hack:
             self.modal_hack = False
             context.window_manager.modal_handler_add(self)
             return {'RUNNING_MODAL'}
@@ -1686,6 +1685,11 @@ class NailMesh:
     # Applies the existing saved shift/scale/rotation uv axis configurations
     # of selected faces. See apply_texture_one_face for more detail.
     def apply_texture(self, auto_apply=False, editmode_only_selected=True):
+
+        # Don't live update selected faces while doing a locked transform
+        auto_apply_during_texture_locked_transform = \
+            auto_apply and AURYCAT_OT_nail_internal_modal_locked_transform.active is not None
+
         apply_mode = 0 # All faces
         if self.me.is_editmode and editmode_only_selected:
             if auto_apply:
@@ -1698,6 +1702,9 @@ class NailMesh:
 
         for face in self.bm.faces:
             if len(face.loops) == 0: # Not sure if this is possible, but safety check anyway
+                continue
+
+            if auto_apply_during_texture_locked_transform and face.select:
                 continue
 
             if apply_mode == 2:
@@ -1781,9 +1788,7 @@ class NailMesh:
 
         # Apply transformation to selected faces
         self.bm.transform(obj_mat, filter={'SELECT'})
-
-        # Sometimes needed after modifying verts in order to access the data correctly again
-        self.bm.faces.ensure_lookup_table()
+        self.bm.normal_update()
 
         # Separate out translation as required by locked_transform_one_face
         obj_translation = obj_mat.translation.xyz
