@@ -99,7 +99,6 @@ def nail_classes():
         AURYCAT_OT_nail_reset_texture_config,
         AURYCAT_OT_nail_reapply_texture_config,
         AURYCAT_OT_nail_copy_active_to_selected,
-        AURYCAT_OT_nail_locked_transform,
         # Interactive Texture-locked Transform Operators
         AURYCAT_OT_nail_modal_locked_translate,
         AURYCAT_OT_nail_modal_locked_rotate,
@@ -455,7 +454,6 @@ class AURYCAT_MT_nail_main_menu(bpy.types.Menu):
         layout.operator(AURYCAT_OT_nail_modal_locked_translate.bl_idname)
         layout.operator(AURYCAT_OT_nail_modal_locked_rotate.bl_idname)
         layout.operator(AURYCAT_OT_nail_modal_locked_scale.bl_idname)
-        layout.operator(AURYCAT_OT_nail_locked_transform.bl_idname, text="Texture-Locked Transform (Noninteractive)")
         prefs = bpy.context.preferences.addons[PACKAGE_NAME].preferences
         layout.prop(prefs, 'use_locked_transform_keymap_GR')
         layout.prop(prefs, 'use_locked_transform_keymap_S')
@@ -928,71 +926,75 @@ class AURYCAT_OT_nail_copy_active_to_selected(Operator):
         return {'FINISHED'}
 
 
-class AURYCAT_OT_nail_locked_transform(Operator):
-    bl_idname = "aurycat.nail_locked_transform"
-    bl_label = "Texture-Locked Transform"
-    bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Transforms selected faces while attempting to retain the same relative texture transform (only object-space transform supported). Note that scaling operations which shear the mesh will not correctly preserve the texture"
 
-    translate: bpy.props.FloatVectorProperty(
-        name="Translate",
-        default=[0,0,0],
-        subtype='TRANSLATION',
-        size=3,
-        step=10)
+## Removed this operator because it's not really useful now that interactive
+## texture-locked transform works. Keeping it just in case.
 
-    scale: bpy.props.FloatVectorProperty(
-        name="Scale",
-        default=[1,1,1],
-        subtype='XYZ',
-        size=3,
-        step=10)
-
-    rotate: bpy.props.FloatVectorProperty(
-        name="Rotation",
-        default=[0,0,0],
-        subtype='EULER',
-        size=3,
-        step=10)
-
-    modal_hack: bpy.props.BoolProperty(
-        name="",
-        default=False,
-        options={'HIDDEN'})
-
-    @classmethod
-    def poll(cls, context):
-       return shared_poll(cls, context, only_face_select=True)
-
-    def invoke(self, context, event):
-        self.translate = [0,0,0]
-        self.scale = [1,1,1]
-        self.rotate = [0,0,0]
-        return self.execute(context)
-
-    def modal(self, context, event):
-        return {'FINISHED'}
-
-    def execute(self, context):
-        sc = Vector(self.scale)
-        if isclose(sc.x, 0): sc.x = 1
-        if isclose(sc.y, 0): sc.y = 1
-        if isclose(sc.z, 0): sc.z = 1
-        mat = Matrix.LocRotScale(self.translate, Euler(self.rotate), sc)
-
-        # I think ideally this would only apply to existing NailMeshes, but
-        # the operator still needs to actually move the faces even if they're
-        # not part of NailMeshes, and that makes things a bit trickier.
-        # Soooo... just turn them into NailMeshes.
-        for obj in context.objects_in_mode:
-            if obj.type == 'MESH':
-                with NailMesh(obj) as nm: # (Turns mesh into NailMesh if not already)
-                    nm.locked_transform(mat, obj.matrix_world @ mat)
-
-        # This action may result in NailMeshes being created; may need wakeup
-        nail_wake_if_needed()
-
-        return {'FINISHED'}
+# class AURYCAT_OT_nail_locked_transform(Operator):
+#     bl_idname = "aurycat.nail_locked_transform"
+#     bl_label = "Texture-Locked Transform"
+#     bl_options = {"REGISTER", "UNDO"}
+#     bl_description = "Transforms selected faces while attempting to retain the same relative texture transform (only object-space transform supported). Note that scaling operations which shear the mesh will not correctly preserve the texture"
+#
+#     translate: bpy.props.FloatVectorProperty(
+#         name="Translate",
+#         default=[0,0,0],
+#         subtype='TRANSLATION',
+#         size=3,
+#         step=10)
+#
+#     scale: bpy.props.FloatVectorProperty(
+#         name="Scale",
+#         default=[1,1,1],
+#         subtype='XYZ',
+#         size=3,
+#         step=10)
+#
+#     rotate: bpy.props.FloatVectorProperty(
+#         name="Rotation",
+#         default=[0,0,0],
+#         subtype='EULER',
+#         size=3,
+#         step=10)
+#
+#     modal_hack: bpy.props.BoolProperty(
+#         name="",
+#         default=False,
+#         options={'HIDDEN'})
+#
+#     @classmethod
+#     def poll(cls, context):
+#        return shared_poll(cls, context, only_face_select=True)
+#
+#     def invoke(self, context, event):
+#         self.translate = [0,0,0]
+#         self.scale = [1,1,1]
+#         self.rotate = [0,0,0]
+#         return self.execute(context)
+#
+#     def modal(self, context, event):
+#         return {'FINISHED'}
+#
+#     def execute(self, context):
+#         sc = Vector(self.scale)
+#         if isclose(sc.x, 0): sc.x = 1
+#         if isclose(sc.y, 0): sc.y = 1
+#         if isclose(sc.z, 0): sc.z = 1
+#         mat = Matrix.LocRotScale(self.translate, Euler(self.rotate), sc)
+#
+#         # I think ideally this would only apply to existing NailMeshes, but
+#         # the operator still needs to actually move the faces even if they're
+#         # not part of NailMeshes, and that makes things a bit trickier.
+#         # Soooo... just turn them into NailMeshes.
+#         for obj in context.objects_in_mode:
+#             if obj.type == 'MESH':
+#                 with NailMesh(obj) as nm: # (Turns mesh into NailMesh if not already)
+#                     nm.locked_transform(mat, obj.matrix_world @ mat)
+#
+#         # This action may result in NailMeshes being created; may need wakeup
+#         nail_wake_if_needed()
+#
+#         return {'FINISHED'}
 
 
 ###############################################################################
