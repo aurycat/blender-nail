@@ -27,7 +27,7 @@ bl_info = {
     "name": "Nail UVs",
     "description": "Implements world-space automatic UV unwrapping similar to Valve's Hammer level editor",
     "author": "aurycat",
-    "version": (0, 2),
+    "version": (0, 3),
     "blender": (4, 1, 1), # Minimum tested version. Might work with older.
     "location": "View3D > Nail (Edit mode)",
     "warning": "",
