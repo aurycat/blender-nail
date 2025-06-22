@@ -21,7 +21,12 @@
 # SOFTWARE.
 
 # History:
+#   0.3 - Public release
 
+# Development:
+#   You can load the script file into the blender text editor and click the
+#   'Run' button. Running in the editor automatically unloads any previously
+#   loaded version.
 
 bl_info = {
     "name": "Nail UVs",
