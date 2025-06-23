@@ -1,4 +1,4 @@
-# blender-nail
+# Hammer-like texturing for Blender
 
 Blender addon to do live UV mapping like Valve's Hammer editor. If you've ever built maps in Hammer, this addon should feel very familiar.
 
