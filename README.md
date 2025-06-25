@@ -11,7 +11,7 @@ Blender addon to do live UV mapping like Valve's Hammer editor. If you've ever b
 
 The following video shows basic usage, plus tips & tricks:
 
-https://github.com/user-attachments/assets/2c822011-d168-47d5-8b12-8fff15938463
+https://github.com/user-attachments/assets/54254035-c485-4890-a758-f37736af725d
 
 ## Advanced info about texture alignment
 
