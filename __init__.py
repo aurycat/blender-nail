@@ -370,7 +370,7 @@ class NailPreferences(AddonPreferences):
     @classmethod
     def get(cls, name):
         try:
-            return bpy.context.preferences.addons[PACKAGE_NAME].preferences[name]
+            return getattr(bpy.context.preferences.addons[PACKAGE_NAME].preferences, name)
         except:
             # Try to get the default value of the property
             return cls.__annotations__[name].keywords['default']
@@ -1581,6 +1581,13 @@ class TextureConfig:
         return f"<TextureConfig, f:{f}, fs:{fs}, sh:{self.shift}, sc:{self.scale}, ro:{self.rotation}, mf:{self.multiple_faces}>"
 
 
+# Effectively a wrapper around BMesh which performs Nail's UV-updating
+# operations. Instances of NailMesh are not meant to be kept around across
+# multiple operator invocations. Except for class methods, NailMesh should
+# always be used via a 'with' statement, e.g:
+#     with NailMesh(...) as nm:
+# On entry to the 'with', a BMesh is created, and on exit from the 'with',
+# the BMesh is saved and freed.
 class NailMesh:
     def __init__(self, obj, readonly=False):
         self.tc = None
