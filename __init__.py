@@ -356,7 +356,7 @@ class NailPreferences(AddonPreferences):
     @classmethod
     def get(cls, name):
         try:
-            return bpy.context.preferences.addons[PACKAGE_NAME].preferences[name]
+            return getattr(bpy.context.preferences.addons[PACKAGE_NAME].preferences, name)
         except:
             # Try to get the default value of the property
             return cls.__annotations__[name].keywords['default']
