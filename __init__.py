@@ -353,19 +353,11 @@ class NailPreferences(AddonPreferences):
         default=False,
         update=visualize_uv_axes_updated)
 
-    snap_to_pixels_global: bpy.props.BoolProperty(default=False)
-    snap_step_x: bpy.props.IntProperty(
-        name="Snap Step X",
-        description="UV snap step for U (X) axis (UV units; e.g. 8)",
-        subtype='FACTOR',
-        default=1,
-        min=1)
-    snap_step_y: bpy.props.IntProperty(
-        name="Snap Step Y",
-        description="UV snap step for V (Y) axis (UV units; e.g. 8)",
-        subtype='FACTOR',
-        default=1,
-        min=1)
+    # These are used to globally persist the properties of the same names in
+    # the Edit Texture operator. Not viewable in the Preferences section.
+    # See AURYCAT_OT_nail_edit_texture_config for more info.
+    snap_to_pixels: bpy.props.BoolProperty(default=False)
+    snap_step: bpy.props.IntVectorProperty(default=[1,1],size=2,min=0)
 
     @classmethod
     def get(cls, name):
@@ -655,18 +647,17 @@ class AURYCAT_OT_nail_edit_texture_config(Operator):
 
     snap_to_pixels: bpy.props.BoolProperty(
         name="Snap to Pixels",
-        description="Align UV coordinates to the pixel grid defined in preferences",
+        description="Align UV coordinates to increments of pixels in texture per face",
         default=False)
 
-    snap_step_x: bpy.props.IntProperty(
-        name="Snap Step X",
-        description="UV snap step for U axis (pixels)",
-        default=1, min=1)
-    
-    snap_step_y: bpy.props.IntProperty(
-        name="Snap Step Y",
-        description="UV snap step for V axis (pixels)",
-        default=1, min=1)
+    snap_step: bpy.props.IntVectorProperty(
+        name="Snap Step",
+        description="Pixel snap increment for Snap To Pixels",
+        default=[1,1],
+        subtype='XYZ',
+        size=2,
+        min=0,
+        soft_max=64)
 
     set_shift: bpy.props.BoolProperty(name="Set Shift")
 
@@ -742,11 +733,9 @@ class AURYCAT_OT_nail_edit_texture_config(Operator):
         layout.use_property_decorate = False
         layout.prop(self, 'snap_to_pixels')
 
-        # Subsection that is disabled if "Snap to Pixels" is disabled
-        sub = layout.column()
-        sub.enabled = self.snap_to_pixels
-        sub.prop(self, 'snap_step_x')
-        sub.prop(self, 'snap_step_y')
+        snap = layout.column()
+        snap.enabled = self.snap_to_pixels
+        snap.prop(self, 'snap_step')
 
         layout.separator()
 
@@ -864,13 +853,6 @@ class AURYCAT_OT_nail_edit_texture_config(Operator):
 
     # The 'execute' portion of this operator applies the properties to the selected faces
     def execute(self, context):
-        # First, we save the values from the window to the addon's "persistent memory".
-        # This ensures that even after the window is closed, Auto-Apply will know these numbers.
-        prefs = bpy.context.preferences.addons[PACKAGE_NAME].preferences
-        prefs.snap_step_x = self.snap_step_x
-        prefs.snap_step_y = self.snap_step_y
-        prefs.snap_to_pixels_global = self.snap_to_pixels
-
         cls = AURYCAT_OT_nail_edit_texture_config
         if self is not cls.last_invoke_self:
             # New invocation, clear this so the "differing value" labels dont show
@@ -896,10 +878,11 @@ class AURYCAT_OT_nail_edit_texture_config(Operator):
                 if self.uv_align == 'face':
                     tc.flags |= TCFLAG_ALIGN_FACE
 
-            tc.snap_to_pixels = False
-            # Transfer snap steps from the Edit Texture window to the config
-            tc.snap_step_x = self.snap_step_x
-            tc.snap_step_y = self.snap_step_y
+            # Save snap settings to prefs, since they're global
+            prefs = bpy.context.preferences.addons[PACKAGE_NAME].preferences
+            prefs.snap_step = self.snap_step
+            prefs.snap_to_pixels = self.snap_to_pixels
+
             set_or_apply_selected_faces(tc, context, set=True, apply=True, only_nailmeshes=True)
 
         return {'FINISHED'}
@@ -1517,7 +1500,6 @@ class TextureConfig:
         # The default None value means that the value is "unset", which is important
         # when taking input values from a user. Unset values are left unchanged on the
         # face being modified.
-        tc.snap_to_pixels = False
         tc.shift = None
         tc.scale = None
         tc.rotation = None
@@ -1543,7 +1525,6 @@ class TextureConfig:
         tc.shift = Vector((0,0))
         tc.scale = Vector((1,1))
         tc.rotation = 0
-        tc.snap_to_pixels = False
         return tc
 
     # None/unset values in the result means different faces had different values
@@ -1590,7 +1571,6 @@ class TextureConfig:
 # the BMesh is saved and freed.
 class NailMesh:
     def __init__(self, obj, readonly=False):
-        self.tc = None
         if obj.type != 'MESH':
             raise RuntimeError("Invalid object type used to initialize NailMesh: " + str(obj))
         self.obj = obj
@@ -1614,6 +1594,12 @@ class NailMesh:
         for attr_name, attr_info in ATTRS.items():
             layer = attr_info[2](self.bm)
             setattr(self, attr_info[3], layer[attr_name])
+        # Cache these for use in apply_texture_one_face which may be called
+        # many times while the NailMesh is in use.
+        self.snap_to_pixels = NailPreferences.get('snap_to_pixels')
+        if self.snap_to_pixels:
+            self.snap_step = Vector(NailPreferences.get('snap_step'))
+            self.snap_xy_per_material_cache = {}
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -1662,7 +1648,6 @@ class NailMesh:
         return True
 
     def set_texture_config(self, tc, only_selected=True):
-        self.tc = tc
         only_selected = self.me.is_editmode and only_selected
         for face in self.bm.faces:
             if only_selected and not face.select:
@@ -1815,6 +1800,28 @@ class NailMesh:
         rotation_mat = Matrix.Rotation(f.rotation, 2)
         uv_layer = self.uv_layer
 
+        snap_x, snap_y = 0, 0
+        if self.snap_to_pixels:
+            if face.material_index in self.snap_xy_per_material_cache:
+                snap_x, snap_y = self.snap_xy_per_material_cache[face.material_index]
+            else:
+                # Lookup face's material and find the snap_x, snap_y values.
+                # Will be the same per material_index value, so cache it.
+                # Some quick profiling shows caching helps a little on large meshes.
+                try:
+                    slot = self.obj.material_slots[face.material_index]
+                    if slot.material and slot.material.use_nodes:
+                        tex_node = next((n for n in slot.material.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image), None)
+                        if tex_node:
+                            img_width, img_height = tex_node.image.size[0], tex_node.image.size[1]
+                            if self.snap_step.x >= 1:
+                                snap_x = img_width / self.snap_step.x
+                            if self.snap_step.y >= 1:
+                                snap_y = img_height / self.snap_step.y
+                            self.snap_xy_per_material_cache[face.material_index] = (snap_x, snap_y)
+                except Exception:
+                    pass
+
         for loop in face.loops:
             vert_coord = loop.vert.co
             if f.world_space:
@@ -1825,43 +1832,11 @@ class NailMesh:
             uv_coord.x /= f.scale.x
             uv_coord.y /= f.scale.y
             uv_coord += f.shift
-            # Apply snap to grid if the "Snap to Pixels" flag is active in the f object
-            if getattr(f, 'snap_to_pixels', True):
-                # 1. First, we get the physical size of the texture
-                img_width, img_height = 1, 1    # default, to avoid dividing by 0
-                found_image = False
-                
-                try:
-                    slot = self.obj.material_slots[face.material_index]
-                    if slot.material and slot.material.use_nodes:
-                        tex_node = next((n for n in slot.material.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image), None)
-                        if tex_node:
-                            img_width, img_height = tex_node.image.size[0], tex_node.image.size[1]
-                            found_image = True
-                except Exception:
-                    pass
 
-                # 2. Get the "snap_step_x" and "snap_step_y" from the settings
-                # If a texture is found, the settings works as a divisor (step in pixels)
-                # If a texture is NOT found, the settings works as the old "texture size"
-                pref_x = getattr(f, 'snap_step_x', 1)
-                pref_y = getattr(f, 'snap_step_y', 1)
-
-                if found_image:
-                    # Snapping to grid: TextureSize / StepFromSettings
-                    # For example: 1024 / 8 pixels = 128 steps across the entire UV
-                    step_x = img_width / pref_x if pref_x > 0 else img_width
-                    step_y = img_height / pref_y if pref_y > 0 else img_height
-                else:
-                    # Fallback: if there is no texture, use the values as absolute (as before)
-                    step_x = pref_x
-                    step_y = pref_y
-
-                # 3. Apply the calculation
-                if step_x > 0:
-                    uv_coord.x = round(uv_coord.x * step_x) / step_x
-                if step_y > 0:
-                    uv_coord.y = round(uv_coord.y * step_y) / step_y
+            if snap_x > 0:
+                uv_coord.x = round(uv_coord.x * snap_x) / snap_x
+            if snap_y > 0:
+                uv_coord.y = round(uv_coord.y * snap_y) / snap_y
 
             loop[uv_layer].uv = uv_coord
 
@@ -2032,8 +2007,7 @@ class NailMesh:
 
     def unpack_face_data(self, face, calc_normal=True):
         class NailFace:
-            def __init__(f, snap_val):
-                f.snap_to_pixels = snap_val
+            pass
 
         shift_flags_attr = face[self.shift_flags_layer]
 
@@ -2041,24 +2015,7 @@ class NailMesh:
         if not flag_is_set(flags, TCFLAG_ENABLED):
             return None
 
-        # 1. Access the addon settings directly
-        try:
-            # __package__ is the system name of the addon folder
-            prefs = bpy.context.preferences.addons[__package__].preferences
-        except:
-            # If the folder was renamed manually, use the old name
-            prefs = bpy.context.preferences.addons["blender-nail-main"].preferences
-
-        # 2. Take values from "persistent memory" (those we saved in the execute method)
-        # If they aren't there (first run), use safe default values
-        snap_val = getattr(prefs, 'snap_to_pixels_global', True)
-        s_x = getattr(prefs, 'snap_step_x', 1)
-        s_y = getattr(prefs, 'snap_step_y', 1)
-
-        # 3. Initialize the face object with these parameters
-        f = NailFace(snap_val)
-        f.snap_step_x = s_x
-        f.snap_step_y = s_y
+        f = NailFace()
         f.shift_flags_attr = shift_flags_attr
         f.scale_rot_attr = face[self.scale_rot_layer]
         f.lock_uaxis_attr = face[self.lock_uaxis_layer]
@@ -2206,18 +2163,17 @@ def frac_n1to1(f):
 def repr_flags(f):
     return f"{f:04b}" if f is not None else "None"
 
-# In the previous version, the NailMesh(obj) object was created
-# without explicitly binding it to the current tc texture configuration
-# during context entry (__enter__).
-# Now, NailMesh is guaranteed to use the current operator configuration
-# from the very beginning.
 def set_or_apply_selected_faces(tc, context, set=False, apply=False, only_nailmeshes=False):
     for obj in context.objects_in_mode:
-        ok = (obj.type == 'MESH') if not only_nailmeshes else NailMesh.is_nail_object(obj)
+        if only_nailmeshes:
+            # Only apply to existing NailMeshes
+            ok = NailMesh.is_nail_object(obj)
+        else:
+            # Apply to all meshes in editmode (turns them into NailMeshes if not already)
+            ok = (obj.type == 'MESH')
+
         if ok:
-            # Pass tc to the NailMesh constructor so it is available inside __enter__
             with NailMesh(obj) as nm:
-                nm.tc = tc  # ! Save the link to the operator configuration !
                 if set:
                     nm.set_texture_config(tc)
                 if apply:
