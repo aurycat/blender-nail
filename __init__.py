@@ -985,7 +985,7 @@ class AURYCAT_OT_nail_copy_active_to_selected(Operator):
 #         if isclose(sc.x, 0): sc.x = 1
 #         if isclose(sc.y, 0): sc.y = 1
 #         if isclose(sc.z, 0): sc.z = 1
-#         mat = Matrix.LocRotScale(self.translate, Euler(self.rotate), sc)
+#         obj_mat = Matrix.LocRotScale(self.translate, Euler(self.rotate), sc)
 #
 #         # I think ideally this would only apply to existing NailMeshes, but
 #         # the operator still needs to actually move the faces even if they're
@@ -994,7 +994,7 @@ class AURYCAT_OT_nail_copy_active_to_selected(Operator):
 #         for obj in context.objects_in_mode:
 #             if obj.type == 'MESH':
 #                 with NailMesh(obj) as nm: # (Turns mesh into NailMesh if not already)
-#                     nm.locked_transform(mat, obj.matrix_world @ mat)
+#                     nm.locked_transform(obj_mat)
 #
 #         # This action may result in NailMeshes being created; may need wakeup
 #         nail_wake_if_needed()
@@ -1366,14 +1366,10 @@ class SharedFinalizeInteractiveTexLockedTransform:
                 # Applying this matrix to all the selected vertices of the mesh will
                 # (hopefully!) perform the exact same transformation that the underlying
                 # Blender op did during the modal part of AURYCAT_OT_nail_internal_modal_locked_transform
-                mat = plus_pivot @ orient @ op_transform @ orient.inverted() @ minus_pivot
-
-                world_plus_pivot = Matrix.Translation(world_pivot_point)
-                world_minus_pivot = Matrix.Translation(-world_pivot_point)
-                world_mat = world_plus_pivot @ world_orient @ op_transform @ world_orient.inverted() @ world_minus_pivot
+                obj_mat = plus_pivot @ orient @ op_transform @ orient.inverted() @ minus_pivot
 
                 with NailMesh(obj) as nm: # (Turns mesh into NailMesh if not already)
-                    nm.locked_transform(mat, world_mat)
+                    nm.locked_transform(obj_mat)
 
         # Otherwise the old vectors will get shown in the same frame
         reset_debug_vectors()
@@ -1783,11 +1779,8 @@ class NailMesh:
 
     # Transforms the mesh and updates the texture shift, scale, and UV axes of the
     # moved by the same transformation so that the UVs shift with the mesh.
-    #
-    # obj_mat is an object-space transformation matrix, and world_mat is the same
-    # transformation but in world-space. Note world_mat is NOT the same as just
-    # `obj.matrix_world @ mat`.
-    def locked_transform(self, obj_mat, world_mat, only_selected=True):
+    # obj_mat is the object-space transformation to apply to faces.
+    def locked_transform(self, obj_mat, only_selected=True):
         all_faces = not (self.me.is_editmode and only_selected)
 
         # Should already be in face selection mode due to operator poll, this is just an assert
@@ -1803,6 +1796,31 @@ class NailMesh:
         # Apply transformation to selected faces
         self.bm.transform(obj_mat, filter={'SELECT'})
         self.bm.normal_update()
+
+        # Convert obj_mat to world-space. It's not just multiplying by
+        # `self.obj.matrix_world``. As a simple example, take an object
+        # whose X scale is 2, and so might have a matrix_world like
+        #  (2),0, 0, 0
+        #   0, 1, 0, 0
+        #   0, 0, 1, 0
+        #   0, 0, 0, 1
+        # Then in edit mode, pressing gx2 will move a face by 2 world-space
+        # units along X, aka 1 object-space unit. That means the obj_mat
+        # and world_mat would be:
+        #   obj_mat: 1, 0, 0,(1)   world_mat: 1, 0, 0,(2)
+        #            0, 1, 0, 0               0, 1, 0, 0
+        #            0, 0, 1, 0               0, 0, 1, 0
+        #            0, 0, 0, 1               0, 0, 0, 1
+        # Meanwhile, `self.obj.matrix_world @ obj_mat` would be:
+        #  (2),0, 0,(2)
+        #   0, 1, 0, 0
+        #   0, 0, 1, 0
+        #   0, 0, 0, 1
+        # Instead, first apply matrix_world.inverted(), aka world-to-object.
+        # That converts to object space. Once in object space, apply obj_mat,
+        # then finally convert back to world space. That will give us the
+        # desired transformation in world space.
+        world_mat = self.obj.matrix_world @ obj_mat @ self.obj.matrix_world.inverted()
 
         # Separate out translation as required by locked_transform_one_face
         obj_translation = obj_mat.translation.xyz
