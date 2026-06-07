@@ -585,14 +585,19 @@ def do_auto_apply(obj):
 ##############################  Main Operators  ###############################
 ###############################################################################
 
-def shared_poll(cls, context, only_face_select=False):
+def shared_poll(cls, context, require_face_select='no'):
     if context.mode != 'EDIT_MESH':
         if cls is not None: cls.poll_message_set("Must be run in Edit Mode")
         return False
-    if only_face_select:
+    if require_face_select == 'yes':
+        m = context.tool_settings.mesh_select_mode[:]
+        if not m[2]:
+            if cls is not None: cls.poll_message_set("Must be run in face selection mode")
+            return False
+    elif require_face_select == 'only':
         m = context.tool_settings.mesh_select_mode[:]
         if not (not m[0] and not m[1] and m[2]):
-            if cls is not None: cls.poll_message_set("Must be run in face selection mode")
+            if cls is not None: cls.poll_message_set("Must be run in only face selection mode")
             return False
     return True
 
@@ -899,21 +904,26 @@ class AURYCAT_OT_nail_copy_active_to_selected(Operator):
     bl_options = {"REGISTER", "UNDO"}
     bl_description = "Copies the texture shift, scale, rotation, and/or alignment of the active selected NailFace to all other selected NailFaces"
 
-    can_copy_uvs_on_last_execute = False
-
-    mask: bpy.props.EnumProperty(
-        name="Copy Mask",
-        items=[('shift',     "Shift",           "Copy Shift value"),
-               ('scale',     "Scale",           "Copy Scale value"),
-               ('rotation',  "Rotation",        "Copy Rotation value"),
-               ('uv',        "UV Alignment",    "Copy UV Alignment mode (only available if the active face has standard Axis or Face UV alignment)"),
-               ('space',     "Space Alignment", "Copy Space Alignment mode")],
-        default={'shift', 'scale', 'rotation'},
+    copy: bpy.props.EnumProperty(
+        name="What To Copy",
+        items=[('shift',     "Shift",             "Copy Shift value of the active face to all selected faces."),
+               ('scale',     "Scale",             "Copy Scale value of the active face to all selected faces."),
+               ('rotation',  "Rotation",          "Copy Rotation value of the active face to all selected faces."),
+               ('space',     "Space Alignment",   "Copy Space Alignment mode of the active face to all selected faces.")],
+        default={'shift', 'scale', 'rotation', 'space'},
         options={'ENUM_FLAG'})
+
+    can_copy_uv_alignment_on_last_execute = False
+    copy_uv: bpy.props.EnumProperty(
+        name="UV Axes",
+        items=[('none',   "Don't copy UV Axes",  "Don't change the UV axes of the selected faces."),
+               ('mode',   "UV Alignment Mode",   "Copy the UV Alignment mode only of the active face, but not the UV axes themselves -- only available if the active face has standard Axis or Face UV alignment."),
+               ('exact',  "Exact UV Axes",       "Copy the exact orientation of the active face's UV.\nWARNING: May cause heavy distortion! Consider using the 'Align Selected With Active' operator instead.")],
+        default='mode')
 
     @classmethod
     def poll(cls, context):
-        return shared_poll(cls, context)
+        return shared_poll(cls, context, require_face_select='yes')
 
     def draw(self, context):
         cls = AURYCAT_OT_nail_copy_active_to_selected
@@ -922,45 +932,71 @@ class AURYCAT_OT_nail_copy_active_to_selected(Operator):
         layout.use_property_split = False
         layout.use_property_decorate = False
 
+        ###
         row = layout.split(factor=0.4)
 
-        col = row.column(align=True)
-        col.alignment = 'RIGHT'
-        col.label(text="Copy Mask")
+        lcol = row.column(align=True)
+        lcol.alignment = 'RIGHT'
+        lcol.label(text=self.properties.bl_rna.properties['copy'].name)
 
-        col = row.column(align=True)
-        col.prop_enum(self, 'mask', 'shift')
-        col.prop_enum(self, 'mask', 'scale')
-        col.prop_enum(self, 'mask', 'rotation')
-        col.prop_enum(self, 'mask', 'space')
-        uv_col = col.column(align=True)
-        uv_col.enabled = cls.can_copy_uvs_on_last_execute
-        uv_col.prop_enum(self, 'mask', 'uv')
+        rcol = row.column(align=True)
+        rcol.prop_enum(self, 'copy', 'shift')
+        rcol.prop_enum(self, 'copy', 'scale')
+        rcol.prop_enum(self, 'copy', 'rotation')
+        rcol.prop_enum(self, 'copy', 'space')
+
+        ###
+        layout.separator()
+        row = layout.split(factor=0.4)
+
+        lcol = row.column(align=True)
+
+        rcol = row.column(align=True)
+        rcol.prop_enum(self, 'copy_uv', 'none')
+        tmp = rcol.column(align=True)
+        tmp.enabled = cls.can_copy_uv_alignment_on_last_execute
+        tmp.prop_enum(self, 'copy_uv', 'mode')
+        rcol.prop_enum(self, 'copy_uv', 'exact')
 
     def execute(self, context):
         cls = AURYCAT_OT_nail_copy_active_to_selected
-        tc, errmsg = TextureConfig.from_active_face(calc_uv_axes=False)
+        tc, errmsg = TextureConfig.from_active_face(calc_uv_axes=(self.copy_uv == 'exact'))
         if errmsg != None:
             self.report({'ERROR'}, errmsg)
             return {'CANCELLED'}
-        flags_set = tc.flags_set
-        flags_set = clear_flag(flags_set, TCFLAG_ENABLED) # Don't change enabled state
-        if 'shift' not in self.mask:
+        tc.flags_set = clear_flag(tc.flags_set, TCFLAG_ENABLED) # Don't change enabled state
+        if 'shift' not in self.copy:
             tc.shift = None
-        if 'scale' not in self.mask:
+        if 'scale' not in self.copy:
             tc.scale = None
-        if 'rotation' not in self.mask:
+        if 'rotation' not in self.copy:
             tc.rotation = None
-        # If set to copy UVs, but the active face has a custom alignment, just ignore the copy
-        # 'Copy Active To Selected' will only switch between Axis/Face alignment
-        cls.can_copy_uvs_on_last_execute = not flag_is_set(tc.flags, TCFLAG_ALIGN_LOCKED)
-        if 'uv' not in self.mask or not cls.can_copy_uvs_on_last_execute:
-            flags_set = clear_flag(flags_set, TCFLAG_ALIGN_FACE | TCFLAG_ALIGN_LOCKED)
-        if 'space' not in self.mask:
-            flags_set = clear_flag(flags_set, TCFLAG_OBJECT_SPACE)
-        tc.flags_set = flags_set
-        tc.uaxis = None
-        tc.vaxis = None
+        if 'space' not in self.copy:
+            tc.flags_set = clear_flag(tc.flags_set, TCFLAG_OBJECT_SPACE)
+        cls.can_copy_uv_alignment_on_last_execute = not flag_is_set(tc.flags, TCFLAG_ALIGN_LOCKED)
+        if self.copy_uv == 'mode':
+            if cls.can_copy_uv_alignment_on_last_execute:
+                # We know the LOCKED flag isn't set, so copy both the FACE
+                # and unset LOCKED flag. Has the effect of clearing any
+                # non-standard axes the selected faces may have.
+                tc.flags_set = set_flag(tc.flags_set, TCFLAG_ALIGN_FACE | TCFLAG_ALIGN_LOCKED)
+            else:
+                # If set to copy UVs, but the active face has a non-standard alignment, ignore it
+                tc.flags_set = clear_flag(tc.flags_set, TCFLAG_ALIGN_FACE | TCFLAG_ALIGN_LOCKED)
+            tc.uaxis = None
+            tc.vaxis = None
+        elif self.copy_uv == 'exact':
+            # Change flags to LOCKED. Then it will copy the uaxis/vaxis variables
+            # from TextureConfig.from_active_face, and recompute the flags if needed.
+            # (See NailMesh.set_face_uv_axes)
+            tc.flags_set = set_flag(tc.flags_set, TCFLAG_ALIGN_FACE | TCFLAG_ALIGN_LOCKED)
+            tc.flags = clear_flag(tc.flags, TCFLAG_ALIGN_FACE)
+            tc.flags = set_flag(tc.flags, TCFLAG_ALIGN_LOCKED)
+        else: # self.copy_uv == 'none'
+            # Don't change FACE/LOCKED flags at all
+            tc.flags_set = clear_flag(tc.flags_set, TCFLAG_ALIGN_FACE | TCFLAG_ALIGN_LOCKED)
+            tc.uaxis = None
+            tc.vaxis = None
         set_or_apply_selected_faces(tc, context, set=True, apply=True, only_nailmeshes=True)
         return {'FINISHED'}
 
@@ -973,7 +1009,7 @@ class AURYCAT_OT_nail_align_selected_with_active(Operator):
 
     @classmethod
     def poll(cls, context):
-        return shared_poll(cls, context)
+        return shared_poll(cls, context, require_face_select='yes')
 
     def execute(self, context):
         tc, errmsg = TextureConfig.from_active_face(calc_uv_axes=True, calc_edgealign_params=True)
@@ -1022,7 +1058,7 @@ class AURYCAT_OT_nail_align_selected_with_active(Operator):
 #
 #     @classmethod
 #     def poll(cls, context):
-#        return shared_poll(cls, context, only_face_select=True)
+#        return shared_poll(cls, context, require_face_select='only')
 #
 #     def invoke(self, context, event):
 #         self.translate = [0,0,0]
@@ -1063,7 +1099,7 @@ class AURYCAT_OT_nail_align_selected_with_active(Operator):
 # User-facing operators for menus
 
 def locked_transform_poll(cls, context):
-    return shared_poll(cls, context, only_face_select=True) and check_pivot_point(cls, context, True)
+    return shared_poll(cls, context, require_face_select='only') and check_pivot_point(cls, context, True)
 
 class AURYCAT_OT_nail_modal_locked_translate(Operator):
     bl_idname = "aurycat.nail_modal_locked_translate"
@@ -1108,7 +1144,7 @@ class AURYCAT_OT_nail_modal_locked_scale(Operator):
 # Optional user-facing operators for keybinds
 
 def keybind_poll(context):
-    if not shared_poll(None, context, only_face_select=True):
+    if not shared_poll(None, context, require_face_select='only'):
         return False
     # Check for at least one NailMesh object in edit mode
     for obj in context.objects_in_mode:
@@ -1687,6 +1723,12 @@ class NailMesh:
             scale_rot_attr.xy = tc.scale
         if tc.rotation is not None:
             scale_rot_attr.z = tc.rotation
+
+        # Used by Copy Active to Selected when 'Copy Exact UV Axes' is used
+        if tc.uaxis is not None and tc.vaxis is not None:
+            f = self.unpack_face_data(face, calc_normal=True)
+            if f is not None:
+                self.set_face_uv_axes(f, tc.uaxis, tc.vaxis)
 
     def edge_align(self, tc, only_selected=True):
         only_selected = self.me.is_editmode and only_selected
