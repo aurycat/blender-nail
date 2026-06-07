@@ -51,6 +51,7 @@ import numpy
 from bpy.types import Operator, Macro, AddonPreferences
 from bpy.app.handlers import persistent
 from mathutils import Euler, Vector, Matrix, Quaternion
+from mathutils.geometry import intersect_plane_plane
 from operator import attrgetter
 
 
@@ -104,6 +105,7 @@ def nail_classes():
         AURYCAT_OT_nail_reset_texture_config,
         AURYCAT_OT_nail_reapply_texture_config,
         AURYCAT_OT_nail_copy_active_to_selected,
+        AURYCAT_OT_nail_align_selected_with_active,
         # Interactive Texture-locked Transform Operators
         AURYCAT_OT_nail_modal_locked_translate,
         AURYCAT_OT_nail_modal_locked_rotate,
@@ -452,7 +454,10 @@ class AURYCAT_MT_nail_main_menu(bpy.types.Menu):
         layout.operator(AURYCAT_OT_nail_edit_texture_config.bl_idname)
         layout.operator(AURYCAT_OT_nail_reset_texture_config.bl_idname)
         layout.operator(AURYCAT_OT_nail_reapply_texture_config.bl_idname)
+
+        layout.separator()
         layout.operator(AURYCAT_OT_nail_copy_active_to_selected.bl_idname)
+        layout.operator(AURYCAT_OT_nail_align_selected_with_active.bl_idname)
 
         layout.separator()
         layout.label(text="Texture-Locked Transform", icon='LOCKED')
@@ -739,10 +744,9 @@ class AURYCAT_OT_nail_edit_texture_config(Operator):
                 s = layout.column()
                 s.scale_y = 0.6
                 s.label(text="Selected face(s) have non-standard UV alignment")
-                s.label(text="This is caused by using Texture-Locked Rotate")
                 s.separator()
             elif 'uv_align' in cls.differing_values:
-                layout.label(text="Selected faces have differing UV alignment values")
+                layout.label(text="Selected faces have differing UV alignments")
         layout.prop(self, 'uv_align')
 
         layout.separator()
@@ -893,43 +897,92 @@ class AURYCAT_OT_nail_copy_active_to_selected(Operator):
     bl_idname = "aurycat.nail_copy_active_to_selected"
     bl_label = "Copy Active to Selected"
     bl_options = {"REGISTER", "UNDO"}
-    bl_description = "Copies the texture shift, scale, rotation, and alignment of the active selected NailFace to all other selected NailFaces"
+    bl_description = "Copies the texture shift, scale, rotation, and/or alignment of the active selected NailFace to all other selected NailFaces"
 
-    copy_uv_axes: bpy.props.BoolProperty(
-        name="Copy UV Axes",
-        default=False)
+    can_copy_uvs_on_last_execute = False
+
+    mask: bpy.props.EnumProperty(
+        name="Copy Mask",
+        items=[('shift',     "Shift",           "Copy Shift value"),
+               ('scale',     "Scale",           "Copy Scale value"),
+               ('rotation',  "Rotation",        "Copy Rotation value"),
+               ('uv',        "UV Alignment",    "Copy UV Alignment mode (only available if the active face has standard Axis or Face UV alignment)"),
+               ('space',     "Space Alignment", "Copy Space Alignment mode")],
+        default={'shift', 'scale', 'rotation'},
+        options={'ENUM_FLAG'})
+
+    @classmethod
+    def poll(cls, context):
+        return shared_poll(cls, context)
+
+    def draw(self, context):
+        cls = AURYCAT_OT_nail_copy_active_to_selected
+
+        layout = self.layout
+        layout.use_property_split = False
+        layout.use_property_decorate = False
+
+        row = layout.split(factor=0.4)
+
+        col = row.column(align=True)
+        col.alignment = 'RIGHT'
+        col.label(text="Copy Mask")
+
+        col = row.column(align=True)
+        col.prop_enum(self, 'mask', 'shift')
+        col.prop_enum(self, 'mask', 'scale')
+        col.prop_enum(self, 'mask', 'rotation')
+        col.prop_enum(self, 'mask', 'space')
+        uv_col = col.column(align=True)
+        uv_col.enabled = cls.can_copy_uvs_on_last_execute
+        uv_col.prop_enum(self, 'mask', 'uv')
+
+    def execute(self, context):
+        cls = AURYCAT_OT_nail_copy_active_to_selected
+        tc, errmsg = TextureConfig.from_active_face(calc_uv_axes=False)
+        if errmsg != None:
+            self.report({'ERROR'}, errmsg)
+            return {'CANCELLED'}
+        flags_set = tc.flags_set
+        flags_set = clear_flag(flags_set, TCFLAG_ENABLED) # Don't change enabled state
+        if 'shift' not in self.mask:
+            tc.shift = None
+        if 'scale' not in self.mask:
+            tc.scale = None
+        if 'rotation' not in self.mask:
+            tc.rotation = None
+        # If set to copy UVs, but the active face has a custom alignment, just ignore the copy
+        # 'Copy Active To Selected' will only switch between Axis/Face alignment
+        cls.can_copy_uvs_on_last_execute = not flag_is_set(tc.flags, TCFLAG_ALIGN_LOCKED)
+        if 'uv' not in self.mask or not cls.can_copy_uvs_on_last_execute:
+            flags_set = clear_flag(flags_set, TCFLAG_ALIGN_FACE | TCFLAG_ALIGN_LOCKED)
+        if 'space' not in self.mask:
+            flags_set = clear_flag(flags_set, TCFLAG_OBJECT_SPACE)
+        tc.flags_set = flags_set
+        tc.uaxis = None
+        tc.vaxis = None
+        set_or_apply_selected_faces(tc, context, set=True, apply=True, only_nailmeshes=True)
+        return {'FINISHED'}
+
+
+class AURYCAT_OT_nail_align_selected_with_active(Operator):
+    bl_idname = "aurycat.nail_align_active_with_selected"
+    bl_label = "Align Selected With Active"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Adjusts the shift, scale, rotation, and UV/Space alignment of the selected faces to align with the active face. This replicates Hammer's 'Alt + Rightclick' feature when applying textures"
 
     @classmethod
     def poll(cls, context):
         return shared_poll(cls, context)
 
     def execute(self, context):
-        tc, errmsg = TextureConfig.from_active_face(calc_uv_axes=self.copy_uv_axes)
+        tc, errmsg = TextureConfig.from_active_face(calc_uv_axes=True, calc_edgealign_params=True)
         if errmsg != None:
             self.report({'ERROR'}, errmsg)
             return {'CANCELLED'}
-
-        flags = tc.flags
-        flags_set = tc.flags_set
-
-        flags_set = clear_flag(flags_set, TCFLAG_ENABLED) # Don't change enabled state
-
-        if self.copy_uv_axes:
-            flags_set = set_flag(flags_set, TCFLAG_ALIGN_LOCKED)
-            flags_set = set_flag(flags_set, TCFLAG_ALIGN_FACE)
-
-            flags = set_flag(flags, TCFLAG_ALIGN_LOCKED)
-            flags = clear_flag(flags, TCFLAG_ALIGN_FACE)
-        else:
-            tc.uaxis = None
-            tc.vaxis = None
-
-        tc.flags = flags
-        tc.flags_set = flags_set
-
-        set_or_apply_selected_faces(tc, context, set=True, apply=True, only_nailmeshes=True)
+        tc.flags_set = clear_flag(tc.flags_set, TCFLAG_ENABLED) # Don't change enabled state
+        set_or_apply_selected_faces(tc, context, edgealign=True, apply=True, only_nailmeshes=True)
         return {'FINISHED'}
-
 
 
 ## Removed this operator because it's not really useful now that interactive
@@ -1469,8 +1522,14 @@ class TextureConfig:
         tc.rotation = None
         tc.flags = 0
         tc.flags_set = 0  # flags_set is a 2nd bitmask to indicate which flags have a valid/set value
+
+        # These are set when calc_uv_axes=True is passed to TextureConfig.from_active_face.
         tc.uaxis = None
         tc.vaxis = None
+
+        # These are set when calc_edgealign_params=True is passed to TextureConfig.from_active_face
+        tc.plane_obj_normal = None # Normal of face plane (always object space)
+        tc.plane_obj_point = None # Point on the face plane (always object space)
 
         # Set True when this TextureConfig represents the common values of multiple
         # faces, from NailMesh.get_texture_config. In that case, None values or
@@ -1506,7 +1565,7 @@ class TextureConfig:
 
     # Returns (tc, None) or (None, error_message_str)
     @classmethod
-    def from_active_face(cls, calc_uv_axes=False):
+    def from_active_face(cls, calc_uv_axes=False, calc_edgealign_params=False):
         active = bpy.context.active_object
         if active is None or active.type != 'MESH' or not active.data.is_editmode:
             return None, "No active mesh in edit mode"
@@ -1516,7 +1575,7 @@ class TextureConfig:
             if nm.bm.faces.active is None or not nm.bm.faces.active.select:
                 return None, "No active selected face"
             tc = TextureConfig.new_unset()
-            if not nm.get_texture_config_one_face(nm.bm.faces.active, tc, calc_uv_axes):
+            if not nm.get_texture_config_one_face(nm.bm.faces.active, tc, calc_uv_axes, calc_edgealign_params):
                 return None, "Active face is not a NailFace"
             return tc, None
 
@@ -1629,11 +1688,69 @@ class NailMesh:
         if tc.rotation is not None:
             scale_rot_attr.z = tc.rotation
 
-        # Used by Copy Active to Selected when 'Copy UV Axes' is checked
-        if tc.uaxis is not None and tc.vaxis is not None:
-            f = self.unpack_face_data(face, calc_normal=True)
-            if f is not None:
-                self.set_face_uv_axes(f, tc.uaxis, tc.vaxis)
+    def edge_align(self, tc, only_selected=True):
+        only_selected = self.me.is_editmode and only_selected
+        for face in self.bm.faces:
+            if only_selected and not face.select:
+                continue
+            self.edge_align_one_face(tc, face)
+
+    # Ported from the function CopyTCoordSystem from Hammer (please don't sue me)
+    # Implements the 'Alt + Rightclick' functionality of Hammer
+    # The source/active face info is in 'tc', the destination face is 'face'
+    # TODO: I think the normals used here need to be adjusted for object or world space
+    def edge_align_one_face(self, tc, face):
+        f = self.unpack_face_data(face, calc_normal=True)
+
+        uaxis = tc.uaxis
+        vaxis = tc.vaxis
+        origin = uaxis*tc.shift.x*tc.scale.x + vaxis*tc.shift.y*tc.scale.y
+
+        edge_point, _ = intersect_plane_plane( \
+            tc.plane_obj_point, tc.plane_obj_normal, \
+            face.calc_center_median(), face.normal)
+
+        if edge_point is not None:
+            edge = tc.plane_obj_normal.cross(face.normal)
+            src_normal = uaxis.cross(vaxis)
+            src_normal.normalize()
+
+            proj_src_normal = src_normal - edge * edge.dot(src_normal)
+            proj_src_normal.normalize()
+            proj_dst_normal = face.normal - edge * edge.dot(face.normal)
+            proj_dst_normal.normalize()
+
+            dot = proj_src_normal.dot(proj_dst_normal)
+            angle = math.acos(dot)
+            if dot < 0.0:
+                angle = math.pi - angle
+
+            edge_rotation = Matrix.Rotation(angle, 4, edge)
+            uaxis = edge_rotation @ uaxis
+            vaxis = edge_rotation @ vaxis
+
+            translation = Matrix.Translation(edge_point)
+            origin_rotation = translation.inverted() @ edge_rotation @ translation
+            origin = origin_rotation @ origin
+
+        # Set UV axes and UV alignment flags
+        self.set_face_uv_axes(f, uaxis, vaxis)
+
+        # Set shift, scale, and rotation
+        f.shift.x = uaxis.dot(origin) / tc.scale.x
+        f.shift.y = vaxis.dot(origin) / tc.scale.y
+        f.shift.x = frac_n1to1(f.shift.x) # Wrap the values to the range (-1, 1)
+        f.shift.y = frac_n1to1(f.shift.y)
+        f.scale = tc.scale.xy
+        f.rotation = tc.rotation
+
+        # Copy the space alignment flag from source face
+        f.shift_flags_attr.z = copy_flag(f.shift_flags_attr.z, tc.flags, TCFLAG_OBJECT_SPACE)
+
+        # Save updated values
+        f.shift_flags_attr.xy = f.shift
+        f.scale_rot_attr.xy = f.scale
+        f.scale_rot_attr.z = f.rotation
 
     # tc is an in-out parameter
     # Pass in a blank TextureConfig to start with, multiple objects can
@@ -1649,7 +1766,7 @@ class NailMesh:
 
     # tc is an in-out parameter
     # Returns True if the face has Nail enabled, False otherwise (tc not modified)
-    def get_texture_config_one_face(self, face, tc, calc_uv_axes=False):
+    def get_texture_config_one_face(self, face, tc, calc_uv_axes=False, calc_edgealign_params=False):
         f = self.unpack_face_data(face, calc_normal=calc_uv_axes)
         if f is None:
             return False
@@ -1689,6 +1806,9 @@ class NailMesh:
                 # If align_locked is True, uaxis and vaxis will already be valid.
                 # Otherwise, they will be garbage, and we need to compute something valid
                 tc.uaxis, tc.vaxis = self.get_face_uv_axes(f)
+            if calc_edgealign_params:
+                tc.plane_obj_normal = face.normal
+                tc.plane_obj_point = face.calc_center_median()
 
         return True
 
@@ -2115,7 +2235,7 @@ def frac_n1to1(f):
 def repr_flags(f):
     return f"{f:04b}" if f is not None else "None"
 
-def set_or_apply_selected_faces(tc, context, set=False, apply=False, only_nailmeshes=False):
+def set_or_apply_selected_faces(tc, context, set=False, edgealign=False, apply=False, only_nailmeshes=False):
     for obj in context.objects_in_mode:
         if only_nailmeshes:
             # Only apply to existing NailMeshes
@@ -2128,6 +2248,8 @@ def set_or_apply_selected_faces(tc, context, set=False, apply=False, only_nailme
             with NailMesh(obj) as nm:
                 if set:
                     nm.set_texture_config(tc)
+                elif edgealign:
+                    nm.edge_align(tc)
                 if apply:
                     nm.apply_texture()
 
@@ -2144,13 +2266,17 @@ def mesh_has_any_selected_faces(me): # must be in editmode
     return False
 
 def flag_is_set(a, b):
-    return (a & b) == b
+    return (int(a) & int(b)) == int(b)
 
 def set_flag(a, b):
-    return a | b
+    return int(a) | int(b)
 
 def clear_flag(a, b):
-    return a & ~b
+    return int(a) & ~int(b)
+
+# Copies the c mask of b to a
+def copy_flag(a, b, c):
+    return int(a) ^ ((int(a) ^ int(b)) & int(c))
 
 # Report error when not in an operator
 def async_report_error(msg):
