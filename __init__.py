@@ -104,6 +104,7 @@ def nail_classes():
         AURYCAT_OT_nail_edit_texture_config,
         AURYCAT_OT_nail_reset_texture_config,
         AURYCAT_OT_nail_reapply_texture_config,
+        AURYCAT_OT_nail_convert_space_alignment,
         AURYCAT_OT_nail_copy_active_to_selected,
         AURYCAT_OT_nail_align_selected_with_active,
         # Interactive Texture-locked Transform Operators
@@ -454,6 +455,7 @@ class AURYCAT_MT_nail_main_menu(bpy.types.Menu):
         layout.operator(AURYCAT_OT_nail_edit_texture_config.bl_idname)
         layout.operator(AURYCAT_OT_nail_reset_texture_config.bl_idname)
         layout.operator(AURYCAT_OT_nail_reapply_texture_config.bl_idname)
+        layout.operator(AURYCAT_OT_nail_convert_space_alignment.bl_idname)
 
         layout.separator()
         layout.operator(AURYCAT_OT_nail_copy_active_to_selected.bl_idname)
@@ -895,6 +897,51 @@ class AURYCAT_OT_nail_reapply_texture_config(Operator):
     def execute(self, context):
         # Doesn't change enabled state
         set_or_apply_selected_faces(None, context, set=False, apply=True, only_nailmeshes=True)
+        return {'FINISHED'}
+
+
+class AURYCAT_OT_nail_convert_space_alignment(Operator):
+    bl_idname = "aurycat.nail_convert_space_alignment"
+    bl_label = "Convert Space Alignment"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Converts the selected NailFaces to world or object space, while adjusting shift, scale, and UV axes to keep the appearance the same"
+
+    convert_to: bpy.props.EnumProperty(
+        name="Convert To",
+        items=[('world',   "World Space",   "Convert selected face textures to World Space"),
+               ('object',  "Object Space",  "Convert selected face textures to Object Space")],
+        default='world')
+
+    @classmethod
+    def poll(cls, context):
+        return shared_poll(cls, context)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = False
+        layout.use_property_decorate = False
+
+        ###
+        row = layout.split(factor=0.4)
+
+        lcol = row.column(align=True)
+        lcol.alignment = 'RIGHT'
+        lcol.label(text=self.properties.bl_rna.properties['convert_to'].name)
+
+        rcol = row.column(align=True)
+        rcol.prop_enum(self, 'convert_to', 'world')
+        rcol.prop_enum(self, 'convert_to', 'object')
+
+    def execute(self, context):
+        for obj in context.objects_in_mode:
+            if NailMesh.is_nail_object(obj):
+                with NailMesh(obj) as nm:
+                    nm.convert_coordinate_space(self.convert_to == 'world')
+                    # Ideally, applying shouldn't be necessary since there
+                    # should be no visual changes. But I think in some cases
+                    # (e.g. nonplanar faces?) there could be visual changes,
+                    # so just apply anyway.
+                    nm.apply_texture()
         return {'FINISHED'}
 
 
@@ -1724,6 +1771,42 @@ class NailMesh:
         f.scale_rot_attr.xy = f.scale
         f.scale_rot_attr.z = f.rotation
 
+    def convert_coordinate_space(self, to_world, only_selected=True):
+        only_selected = self.me.is_editmode and only_selected
+        for face in self.bm.faces:
+            if only_selected and not face.select:
+                continue
+            self.convert_coordinate_space_one_face(face, to_world)
+
+    def convert_coordinate_space_one_face(self, face, to_world):
+        f = self.unpack_face_data(face, calc_normal=False)
+        if f is None:
+            return
+        if f.world_space == to_world:
+            return
+
+        rs_mat = self.matrix_world.copy()
+        if to_world:
+            f.flags = clear_flag(f.shift_flags_attr.z, TCFLAG_OBJECT_SPACE)
+            f.world_space = True
+            f.normal = self.rot_world @ face.normal
+            saved_normal = face.normal
+        else: # to object
+            f.flags = set_flag(f.shift_flags_attr.z, TCFLAG_OBJECT_SPACE)
+            f.world_space = False
+            f.normal = face.normal
+            rs_mat.invert()
+            saved_normal = self.rot_world @ face.normal
+
+        # Write back modified flags
+        f.shift_flags_attr.z = float(f.flags)
+
+        # Separate out translation as required by locked_transform_one_face
+        translation = rs_mat.translation.xyz
+        rs_mat.translation.xyz = 0
+
+        self.locked_transform_one_face(f, translation, rs_mat, saved_normal)
+
     # tc is an in-out parameter
     # Pass in a blank TextureConfig to start with, multiple objects can
     # be collected together by passing the same tc back in each time
@@ -1923,23 +2006,17 @@ class NailMesh:
         i = 0
         for face in self.bm.faces:
             if all_faces or face.select:
-                self.locked_transform_one_face(face, obj_translation, obj_mat, world_translation, world_mat, saved_normals[i])
+                f = self.unpack_face_data(face)
+                if f is None:
+                    continue
+                if f.world_space:
+                    self.locked_transform_one_face(f, world_translation, world_mat, self.rot_world @ saved_normals[i])
+                else:
+                    self.locked_transform_one_face(f, obj_translation, obj_mat, saved_normals[i])
                 i += 1
 
     # See header for locked_transform
-    def locked_transform_one_face(self, face, obj_translation, obj_rs_mat, world_translation, world_rs_mat, saved_normal):
-        f = self.unpack_face_data(face)
-        if f is None:
-            return
-
-        if f.world_space:
-            rs_mat = world_rs_mat
-            translation = world_translation
-            saved_normal = self.rot_world @ saved_normal
-        else:
-            rs_mat = obj_rs_mat
-            translation = obj_translation
-
+    def locked_transform_one_face(self, f, translation, rs_mat, saved_normal):
         # Initially use old normal for finding existing uvaxes
         new_normal = f.normal # Already in obj or world space, depending on f.world_space
         f.normal = saved_normal
@@ -2015,7 +2092,7 @@ class NailMesh:
                 f.lock_vaxis_attr.xyz = vaxis
 
         # Save updated flags
-        f.shift_flags_attr.z = flags
+        f.shift_flags_attr.z = float(flags)
 
     # Expects f.normal to be set (unpack_face_data calc_normal=True)
     def get_face_uv_axes(self, f):
