@@ -1541,8 +1541,9 @@ class TextureConfig:
         tc.vaxis = None
 
         # These are set when calc_edgealign_params=True is passed to TextureConfig.from_active_face
-        tc.plane_obj_normal = None # Normal of face plane (always object space)
-        tc.plane_obj_point = None # Point on the face plane (always object space)
+        tc.plane_world_normal = None # Normal of face plane (always world space)
+        tc.plane_world_point = None # Point on the face plane (always world space)
+        tc.matrix_world = None # World matrix of object, if the face used object space alignment, otherwise None
 
         # Set True when this TextureConfig represents the common values of multiple
         # faces, from NailMesh.get_texture_config. In that case, None values or
@@ -1719,24 +1720,56 @@ class NailMesh:
     # The source/active face info is in 'tc', the destination face is 'face'
     # TODO: I think the normals used here need to be adjusted for object or world space
     def edge_align_one_face(self, tc, face):
-        f = self.unpack_face_data(face, calc_normal=True)
+        # face_was_obj_space = flag_is_set(face[self.shift_flags_layer].z, TCFLAG_OBJECT_SPACE)
 
-        uaxis = tc.uaxis
-        vaxis = tc.vaxis
-        origin = uaxis*tc.shift.x*tc.scale.x + vaxis*tc.shift.y*tc.scale.y
+        uaxis = tc.uaxis.copy()
+        vaxis = tc.vaxis.copy()
+        shift = tc.shift.copy()
+        scale = tc.scale.copy()
+        rs_mat = None
+        if tc.matrix_world != None:
+            rs_mat = tc.matrix_world.copy()
+
+        self.convert_coordinate_space_one_face(face, to_world=True)
+
+        f = self.unpack_face_data(face, calc_normal=True)
+        if f is None:
+            return
+
+        # Perform all computations in world space so that faces of different
+        # objects can be aligned.
+        if rs_mat != None:
+            # Need to convert tc values to world space
+            translation = rs_mat.translation.xyz
+            rs_mat.translation.xyz = 0
+            if not rs_mat.is_identity:
+                uaxis = rs_mat @ uaxis
+                vaxis = rs_mat @ vaxis
+                scale = scale.copy()
+                scale.x *= uaxis.length
+                scale.y *= vaxis.length
+                uaxis.normalize()
+                vaxis.normalize()
+            shift = shift.copy()
+            shift.x = frac_n1to1(shift.x - translation.dot(uaxis) / scale.x)
+            shift.y = frac_n1to1(shift.y - translation.dot(vaxis) / scale.y)
+
+        origin = uaxis*shift.x*scale.x + vaxis*shift.y*scale.y
 
         edge_point, _ = intersect_plane_plane( \
-            tc.plane_obj_point, tc.plane_obj_normal, \
-            face.calc_center_median(), face.normal)
+            tc.plane_world_point, tc.plane_world_normal, \
+            self.matrix_world @ face.calc_center_median(), f.normal)
 
         if edge_point is not None:
-            edge = tc.plane_obj_normal.cross(face.normal)
+            # The source and the destination faces are not parallel,
+            # so wrap the texture around the intersection edge
+            edge = tc.plane_world_normal.cross(f.normal)
             src_normal = uaxis.cross(vaxis)
             src_normal.normalize()
 
             proj_src_normal = src_normal - edge * edge.dot(src_normal)
             proj_src_normal.normalize()
-            proj_dst_normal = face.normal - edge * edge.dot(face.normal)
+            proj_dst_normal = f.normal - edge * edge.dot(f.normal)
             proj_dst_normal.normalize()
 
             dot = proj_src_normal.dot(proj_dst_normal)
@@ -1752,24 +1785,38 @@ class NailMesh:
             origin_rotation = translation.inverted() @ edge_rotation @ translation
             origin = origin_rotation @ origin
 
+        # # Copy the space alignment flag from source face
+        # if flag_is_set(tc.flags, TCFLAG_OBJECT_SPACE):
+        #     # Source face is in object space
+        #     inv_rot_world = self.rot_world.inverted()
+        #     uaxis = inv_rot_world @ uaxis
+        #     vaxis = inv_rot_world @ vaxis
+        #     origin = self.matrix_world.inverted() @ origin
+        #     f.normal = face.normal
+        #     f.world_space = False
+        #     f.shift_flags_attr.z = float(set_flag(f.shift_flags_attr, TCFLAG_OBJECT_SPACE))
+        # else:
+        #     # Source face is in world space
+        #     f.normal = world_face_normal
+        #     f.world_space = True
+        #     f.shift_flags_attr.z = float(clear_flag(f.shift_flags_attr, TCFLAG_OBJECT_SPACE))
+
         # Set UV axes and UV alignment flags
         self.set_face_uv_axes(f, uaxis, vaxis)
 
         # Set shift, scale, and rotation
-        f.shift.x = uaxis.dot(origin) / tc.scale.x
-        f.shift.y = vaxis.dot(origin) / tc.scale.y
-        f.shift.x = frac_n1to1(f.shift.x) # Wrap the values to the range (-1, 1)
-        f.shift.y = frac_n1to1(f.shift.y)
-        f.scale = tc.scale.xy
+        f.shift.x = frac_n1to1(uaxis.dot(origin) / scale.x)
+        f.shift.y = frac_n1to1(vaxis.dot(origin) / scale.y)
+        f.scale = scale.xy
         f.rotation = tc.rotation
-
-        # Copy the space alignment flag from source face
-        f.shift_flags_attr.z = copy_flag(f.shift_flags_attr.z, tc.flags, TCFLAG_OBJECT_SPACE)
 
         # Save updated values
         f.shift_flags_attr.xy = f.shift
         f.scale_rot_attr.xy = f.scale
         f.scale_rot_attr.z = f.rotation
+
+        if flag_is_set(tc.flags, TCFLAG_OBJECT_SPACE):
+            self.convert_coordinate_space_one_face(face, to_world=False)
 
     def convert_coordinate_space(self, to_world, only_selected=True):
         only_selected = self.me.is_editmode and only_selected
@@ -1862,8 +1909,12 @@ class NailMesh:
                 # Otherwise, they will be garbage, and we need to compute something valid
                 tc.uaxis, tc.vaxis = self.get_face_uv_axes(f)
             if calc_edgealign_params:
-                tc.plane_obj_normal = face.normal
-                tc.plane_obj_point = face.calc_center_median()
+                tc.plane_world_normal = self.rot_world @ face.normal
+                tc.plane_world_point = self.matrix_world @ face.calc_center_median()
+                if flag_is_set(tc.flags, TCFLAG_OBJECT_SPACE):
+                    tc.matrix_world = self.matrix_world.copy()
+                else:
+                    tc.matrix_world = None
 
         return True
 
