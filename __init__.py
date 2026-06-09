@@ -1541,9 +1541,9 @@ class TextureConfig:
         tc.vaxis = None
 
         # These are set when calc_edgealign_params=True is passed to TextureConfig.from_active_face
+        # Also note when using calc_edgealign_params, shift/scale/uaxis/vaxis are converted to world space
         tc.plane_world_normal = None # Normal of face plane (always world space)
         tc.plane_world_point = None # Point on the face plane (always world space)
-        tc.matrix_world = None # World matrix of object, if the face used object space alignment, otherwise None
 
         # Set True when this TextureConfig represents the common values of multiple
         # faces, from NailMesh.get_texture_config. In that case, None values or
@@ -1718,43 +1718,16 @@ class NailMesh:
     # Ported from the function CopyTCoordSystem from Hammer (please don't sue me)
     # Implements the 'Alt + Rightclick' functionality of Hammer
     # The source/active face info is in 'tc', the destination face is 'face'
-    # TODO: I think the normals used here need to be adjusted for object or world space
     def edge_align_one_face(self, tc, face):
-        # face_was_obj_space = flag_is_set(face[self.shift_flags_layer].z, TCFLAG_OBJECT_SPACE)
-
-        uaxis = tc.uaxis.copy()
-        vaxis = tc.vaxis.copy()
-        shift = tc.shift.copy()
-        scale = tc.scale.copy()
-        rs_mat = None
-        if tc.matrix_world != None:
-            rs_mat = tc.matrix_world.copy()
-
         self.convert_coordinate_space_one_face(face, to_world=True)
 
         f = self.unpack_face_data(face, calc_normal=True)
         if f is None:
             return
 
-        # Perform all computations in world space so that faces of different
-        # objects can be aligned.
-        if rs_mat != None:
-            # Need to convert tc values to world space
-            translation = rs_mat.translation.xyz
-            rs_mat.translation.xyz = 0
-            if not rs_mat.is_identity:
-                uaxis = rs_mat @ uaxis
-                vaxis = rs_mat @ vaxis
-                scale = scale.copy()
-                scale.x *= uaxis.length
-                scale.y *= vaxis.length
-                uaxis.normalize()
-                vaxis.normalize()
-            shift = shift.copy()
-            shift.x = frac_n1to1(shift.x - translation.dot(uaxis) / scale.x)
-            shift.y = frac_n1to1(shift.y - translation.dot(vaxis) / scale.y)
-
-        origin = uaxis*shift.x*scale.x + vaxis*shift.y*scale.y
+        uaxis = tc.uaxis
+        vaxis = tc.vaxis
+        origin = uaxis*tc.shift.x*tc.scale.x + vaxis*tc.shift.y*tc.scale.y
 
         edge_point, _ = intersect_plane_plane( \
             tc.plane_world_point, tc.plane_world_normal, \
@@ -1785,29 +1758,13 @@ class NailMesh:
             origin_rotation = translation.inverted() @ edge_rotation @ translation
             origin = origin_rotation @ origin
 
-        # # Copy the space alignment flag from source face
-        # if flag_is_set(tc.flags, TCFLAG_OBJECT_SPACE):
-        #     # Source face is in object space
-        #     inv_rot_world = self.rot_world.inverted()
-        #     uaxis = inv_rot_world @ uaxis
-        #     vaxis = inv_rot_world @ vaxis
-        #     origin = self.matrix_world.inverted() @ origin
-        #     f.normal = face.normal
-        #     f.world_space = False
-        #     f.shift_flags_attr.z = float(set_flag(f.shift_flags_attr, TCFLAG_OBJECT_SPACE))
-        # else:
-        #     # Source face is in world space
-        #     f.normal = world_face_normal
-        #     f.world_space = True
-        #     f.shift_flags_attr.z = float(clear_flag(f.shift_flags_attr, TCFLAG_OBJECT_SPACE))
-
         # Set UV axes and UV alignment flags
         self.set_face_uv_axes(f, uaxis, vaxis)
 
         # Set shift, scale, and rotation
-        f.shift.x = frac_n1to1(uaxis.dot(origin) / scale.x)
-        f.shift.y = frac_n1to1(vaxis.dot(origin) / scale.y)
-        f.scale = scale.xy
+        f.shift.x = frac_n1to1(uaxis.dot(origin) / tc.scale.x)
+        f.shift.y = frac_n1to1(vaxis.dot(origin) / tc.scale.y)
+        f.scale = tc.scale.xy
         f.rotation = tc.rotation
 
         # Save updated values
@@ -1912,9 +1869,10 @@ class NailMesh:
                 tc.plane_world_normal = self.rot_world @ face.normal
                 tc.plane_world_point = self.matrix_world @ face.calc_center_median()
                 if flag_is_set(tc.flags, TCFLAG_OBJECT_SPACE):
-                    tc.matrix_world = self.matrix_world.copy()
-                else:
-                    tc.matrix_world = None
+                    # For edgealign, uaxis/vaxis/shift/scale need to be in world space
+                    tc.uaxis, tc.vaxis, tc.shift, tc.scale = \
+                        transform_uvaxis_shift_scale_by_matrix(\
+                            tc.uaxis, tc.vaxis, tc.shift, tc.scale, self.matrix_world)
 
         return True
 
@@ -2072,55 +2030,27 @@ class NailMesh:
         new_normal = f.normal # Already in obj or world space, depending on f.world_space
         f.normal = saved_normal
 
-        # Translation is passed separately, so if the matrix is identity it means
-        # the transformation is translation-only. In that case we don't need to
-        # calculate new uv axes, since they won't change, and consequently we don't
-        # need to set the ALIGN_LOCKED flag
-        translation_only = rs_mat.is_identity
-
         # Get the existing uv axes
         # Note these vectors are always normalized
         uaxis, vaxis = self.get_face_uv_axes(f)
 
-        if not translation_only:
-            # Rotate & scale the uv axes by the matrix. The new length of uaxis and
-            # vaxis gives us a multiplication factor for the scale of the texture
-            uaxis = rs_mat @ uaxis
-            vaxis = rs_mat @ vaxis
-
-            # Apply scale changes
-            f.scale.x *= uaxis.length # These should be divided by the original u and vaxis
-            f.scale.y *= vaxis.length # lengths, but those are always 1, so it's not necessary.
-            # Save updated scale
+        # Modifies inputs, returns true if uvaxes/scale were modified
+        if transform_uvaxis_shift_scale_by_matrix_inplace(uaxis, vaxis, f.shift, f.scale, rs_mat, translation):
             f.scale_rot_attr.xy = f.scale
 
-            # Scale has been applied, so the UV axes can be normalized again
-            uaxis.normalize()
-            vaxis.normalize()
-
-            # Before "locking in" as ALIGNED_LOCKED, check to see if the new UV axes
-            # are the same as Axis or Face alignment modes would be. That can happen
-            # if a face is rotated 90 degrees, for example. If so, we can switch to
-            # Axis or Face alignment instead, which makes future texture projection
-            # more likely to do "what the user expects"(TM).
-            #
-            # Calculate UV axes again in axis & face modes, using the new face normal
+            # Calculate UV axes again using the new face normal
             # (post- object transform being applied).
             f.normal = new_normal
             self.set_face_uv_axes(f, uaxis, vaxis)
 
-        # Compute the new texture shift value by projecting the translation
-        # onto the new UV axes.
-        f.shift.x -= translation.dot(uaxis) / f.scale.x
-        f.shift.y -= translation.dot(vaxis) / f.scale.y
-        f.shift.x = frac_n1to1(f.shift.x) # Wrap the values to the range (-1, 1)
-        f.shift.y = frac_n1to1(f.shift.y)
-        # Save updated shift value
         f.shift_flags_attr.xy = f.shift
 
     # Sets a face's UV axes to the arguments, and sets the face to ALIGN_LOCKED.
     # Except, if the given UV axes match what would already be calculated as the
     # face's axis-aligned or face-aligned UV axes, it switches to that mode instead.
+    # That can happen if a face is rotated 90 degrees, for example. Switching to
+    # one of the normal modes which makes future texture projection more likely to
+    # do "what the user expects"(TM).
     def set_face_uv_axes(self, f, uaxis, vaxis):
         flags = f.flags
         aa_uaxis, aa_vaxis = self.get_axis_aligned_uv_axes(f)
@@ -2331,6 +2261,51 @@ def frac_n1to1(f):
     # Copies sign of f onto value of x. The '+ 0' forces a negative zero
     # to be converted to normal positive zero.
     return math.copysign(x, f) + 0
+
+def transform_uvaxis_shift_scale_by_matrix(uaxis, vaxis, shift, scale, matrix):
+    uaxis = uaxis.copy()
+    vaxis = vaxis.copy()
+    shift = shift.copy()
+    scale = scale.copy()
+    transform_uvaxis_shift_scale_by_matrix_inplace( \
+        uaxis, vaxis, shift, scale, matrix.to_3x3(), matrix.translation)
+    return (uaxis, vaxis, shift, scale)
+
+# Applies a matrix (pre-separated into 3x3 rotation+scale matrix and translation vector)
+# to shift, scale, and pre-normalized uaxis and vaxis vectors. Modifies the inputs.
+def transform_uvaxis_shift_scale_by_matrix_inplace(uaxis, vaxis, shift, scale, rotation_scale_mat, translation): 
+    # Translation is passed separately, so if the matrix is identity it means
+    # the transformation is translation-only. In that case we don't need to
+    # calculate new uv axes, since they won't change, and consequently we don't
+    # need to set the ALIGN_LOCKED flag
+    translation_only = rotation_scale_mat.is_identity
+
+    if not translation_only:
+        # Rotate & scale the uv axes by the matrix. The new length of uaxis and
+        # vaxis gives us a multiplication factor for the scale of the texture
+        uaxis.xyz = rotation_scale_mat @ uaxis.xyz
+        vaxis.xyz = rotation_scale_mat @ vaxis.xyz
+
+        # Apply scale changes
+        # These should be divided by the original u and vaxis
+        # lengths, but those are always 1, so it's not necessary.
+        scale.x *= uaxis.length
+        scale.y *= vaxis.length
+        # scale = Vector(scale.x * uaxis.length, \
+        #                scale.y * vaxis.length)
+
+        # Scale has been applied, so the UV axes can be normalized again
+        uaxis.normalize()
+        vaxis.normalize()
+
+    # Compute the new texture shift value by projecting the translation
+    # onto the new UV axes.
+    shift.x -= translation.dot(uaxis) / scale.x
+    shift.y -= translation.dot(vaxis) / scale.y
+    shift.x = frac_n1to1(shift.x) # Wrap the values to the range (-1, 1)
+    shift.y = frac_n1to1(shift.y)
+
+    return not translation_only
 
 def repr_flags(f):
     return f"{f:04b}" if f is not None else "None"
