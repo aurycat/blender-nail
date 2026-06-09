@@ -1719,11 +1719,11 @@ class NailMesh:
     # Implements the 'Alt + Rightclick' functionality of Hammer
     # The source/active face info is in 'tc', the destination face is 'face'
     def edge_align_one_face(self, tc, face):
-        self.convert_coordinate_space_one_face(face, to_world=True)
-
         f = self.unpack_face_data(face, calc_normal=True)
         if f is None:
             return
+
+        face_world_normal = f.normal if f.world_space else self.rot_world @ face.normal
 
         uaxis = tc.uaxis
         vaxis = tc.vaxis
@@ -1731,18 +1731,18 @@ class NailMesh:
 
         edge_point, _ = intersect_plane_plane( \
             tc.plane_world_point, tc.plane_world_normal, \
-            self.matrix_world @ face.calc_center_median(), f.normal)
+            self.matrix_world @ face.calc_center_median(), face_world_normal)
 
         if edge_point is not None:
             # The source and the destination faces are not parallel,
             # so wrap the texture around the intersection edge
-            edge = tc.plane_world_normal.cross(f.normal)
+            edge = tc.plane_world_normal.cross(face_world_normal)
             src_normal = uaxis.cross(vaxis)
             src_normal.normalize()
 
             proj_src_normal = src_normal - edge * edge.dot(src_normal)
             proj_src_normal.normalize()
-            proj_dst_normal = f.normal - edge * edge.dot(f.normal)
+            proj_dst_normal = face_world_normal - edge * edge.dot(face_world_normal)
             proj_dst_normal.normalize()
 
             dot = proj_src_normal.dot(proj_dst_normal)
@@ -1758,22 +1758,25 @@ class NailMesh:
             origin_rotation = translation.inverted() @ edge_rotation @ translation
             origin = origin_rotation @ origin
 
-        # Set UV axes and UV alignment flags
-        self.set_face_uv_axes(f, uaxis, vaxis)
+        # Get the new shift, scale, and rotation for the dst face
+        scale = tc.scale.xy
+        shift = Vector((frac_n1to1(uaxis.dot(origin) / scale.x), \
+                        frac_n1to1(vaxis.dot(origin) / scale.y)))
+        rotation = tc.rotation
 
-        # Set shift, scale, and rotation
-        f.shift.x = frac_n1to1(uaxis.dot(origin) / tc.scale.x)
-        f.shift.y = frac_n1to1(vaxis.dot(origin) / tc.scale.y)
-        f.scale = tc.scale.xy
-        f.rotation = tc.rotation
-
-        # Save updated values
-        f.shift_flags_attr.xy = f.shift
-        f.scale_rot_attr.xy = f.scale
-        f.scale_rot_attr.z = f.rotation
-
+        # Set dst face to the space alignment of the src face
+        f.shift_flags_attr.z = float(copy_flag(f.shift_flags_attr.z, tc.flags, TCFLAG_OBJECT_SPACE))
         if flag_is_set(tc.flags, TCFLAG_OBJECT_SPACE):
-            self.convert_coordinate_space_one_face(face, to_world=False)
+            # Convert to object space
+            uaxis, vaxis, shift, scale = \
+                transform_uvaxis_shift_scale_by_matrix( \
+                    uaxis, vaxis, shift, scale, self.matrix_world.inverted())
+
+        # Apply all the other settings
+        self.set_face_uv_axes(f, uaxis, vaxis)
+        f.shift_flags_attr.xy = shift
+        f.scale_rot_attr.xy = scale
+        f.scale_rot_attr.z = rotation
 
     def convert_coordinate_space(self, to_world, only_selected=True):
         only_selected = self.me.is_editmode and only_selected
