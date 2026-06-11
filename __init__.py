@@ -1767,10 +1767,10 @@ class NailMesh:
         # Set dst face to the space alignment of the src face
         f.shift_flags_attr.z = float(copy_flag(f.shift_flags_attr.z, tc.flags, TCFLAG_OBJECT_SPACE))
         if flag_is_set(tc.flags, TCFLAG_OBJECT_SPACE):
-            # Convert to object space
-            uaxis, vaxis, shift, scale = \
-                transform_uvaxis_shift_scale_by_matrix( \
-                    uaxis, vaxis, shift, scale, self.matrix_world.inverted())
+            w2o = self.matrix_world.inverted()
+            # Convert to object space (modifies shift and scale arguments)
+            uaxis, vaxis = transform_uvaxis_shift_scale_by_matrix( \
+                uaxis, vaxis, shift, scale, w2o.to_3x3(), w2o.translation)
 
         # Apply all the other settings
         self.set_face_uv_axes(f, uaxis, vaxis)
@@ -1872,10 +1872,11 @@ class NailMesh:
                 tc.plane_world_normal = self.rot_world @ face.normal
                 tc.plane_world_point = self.matrix_world @ face.calc_center_median()
                 if flag_is_set(tc.flags, TCFLAG_OBJECT_SPACE):
+                    o2w = self.matrix_world
                     # For edgealign, uaxis/vaxis/shift/scale need to be in world space
-                    tc.uaxis, tc.vaxis, tc.shift, tc.scale = \
-                        transform_uvaxis_shift_scale_by_matrix(\
-                            tc.uaxis, tc.vaxis, tc.shift, tc.scale, self.matrix_world)
+                    # (Modifies tc.shift and tc.scale arguments)
+                    tc.uaxis, tc.vaxis = transform_uvaxis_shift_scale_by_matrix( \
+                        tc.uaxis, tc.vaxis, tc.shift, tc.scale, o2w.to_3x3(), o2w.translation)
 
         return True
 
@@ -2037,8 +2038,12 @@ class NailMesh:
         # Note these vectors are always normalized
         uaxis, vaxis = self.get_face_uv_axes(f)
 
-        # Modifies inputs, returns true if uvaxes/scale were modified
-        if transform_uvaxis_shift_scale_by_matrix_inplace(uaxis, vaxis, f.shift, f.scale, rs_mat, translation):
+        # Apply transform. Modifies f.shift and f.scale arguments.
+        # If rs_mat is not identity, a rotation and/or scale was applied,
+        # so the uvaxes and scale may have been modified.
+        uaxis, vaxis = transform_uvaxis_shift_scale_by_matrix( \
+            uaxis, vaxis, f.shift, f.scale, rs_mat, translation)
+        if not rs_mat.is_identity:
             f.scale_rot_attr.xy = f.scale
 
             # Calculate UV axes again using the new face normal
@@ -2265,37 +2270,29 @@ def frac_n1to1(f):
     # to be converted to normal positive zero.
     return math.copysign(x, f) + 0
 
-def transform_uvaxis_shift_scale_by_matrix(uaxis, vaxis, shift, scale, matrix):
-    uaxis = uaxis.copy()
-    vaxis = vaxis.copy()
-    shift = shift.copy()
-    scale = scale.copy()
-    transform_uvaxis_shift_scale_by_matrix_inplace( \
-        uaxis, vaxis, shift, scale, matrix.to_3x3(), matrix.translation)
-    return (uaxis, vaxis, shift, scale)
-
-# Applies a matrix (pre-separated into 3x3 rotation+scale matrix and translation vector)
-# to shift, scale, and pre-normalized uaxis and vaxis vectors. Modifies the inputs.
-def transform_uvaxis_shift_scale_by_matrix_inplace(uaxis, vaxis, shift, scale, rotation_scale_mat, translation): 
+# Applies a matrix (pre-separated into 3x3 rotation+scale matrix and translation
+# vector) to shift, scale, and pre-normalized uaxis and vaxis vectors. Modifies
+# the shfit and scale inputs. Does not modify uaxis or vaxis; returns new uvaxis
+# vectors. The uvaxes and scale will only be modified when rotation_scale_mat is
+# not identity.
+# (uaxis and vaxis are not directly modified because it results in modifying the
+# mesh attributes in-place, which seems to severly bug out Blender. Not sure why.)
+def transform_uvaxis_shift_scale_by_matrix(uaxis, vaxis, shift, scale, rotation_scale_mat, translation): 
     # Translation is passed separately, so if the matrix is identity it means
     # the transformation is translation-only. In that case we don't need to
     # calculate new uv axes, since they won't change, and consequently we don't
     # need to set the ALIGN_LOCKED flag
-    translation_only = rotation_scale_mat.is_identity
-
-    if not translation_only:
+    if not rotation_scale_mat.is_identity:
         # Rotate & scale the uv axes by the matrix. The new length of uaxis and
         # vaxis gives us a multiplication factor for the scale of the texture
-        uaxis.xyz = rotation_scale_mat @ uaxis.xyz
-        vaxis.xyz = rotation_scale_mat @ vaxis.xyz
+        uaxis = rotation_scale_mat @ uaxis.xyz
+        vaxis = rotation_scale_mat @ vaxis.xyz
 
         # Apply scale changes
         # These should be divided by the original u and vaxis
         # lengths, but those are always 1, so it's not necessary.
         scale.x *= uaxis.length
         scale.y *= vaxis.length
-        # scale = Vector(scale.x * uaxis.length, \
-        #                scale.y * vaxis.length)
 
         # Scale has been applied, so the UV axes can be normalized again
         uaxis.normalize()
@@ -2308,7 +2305,7 @@ def transform_uvaxis_shift_scale_by_matrix_inplace(uaxis, vaxis, shift, scale, r
     shift.x = frac_n1to1(shift.x) # Wrap the values to the range (-1, 1)
     shift.y = frac_n1to1(shift.y)
 
-    return not translation_only
+    return (uaxis, vaxis)
 
 def repr_flags(f):
     return f"{f:04b}" if f is not None else "None"
