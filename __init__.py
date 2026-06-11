@@ -356,6 +356,12 @@ class NailPreferences(AddonPreferences):
         default=False,
         update=visualize_uv_axes_updated)
 
+    # These are used to globally persist the properties of the same names in
+    # the Edit Texture operator. Not viewable in the Preferences section.
+    # See AURYCAT_OT_nail_edit_texture_config for more info.
+    snap_to_pixels: bpy.props.BoolProperty(default=False)
+    snap_step: bpy.props.IntVectorProperty(default=[1,1],size=2,min=0)
+
     @classmethod
     def get(cls, name):
         try:
@@ -651,6 +657,20 @@ class AURYCAT_OT_nail_edit_texture_config(Operator):
     differing_values = set()
     locked_alignment = False
 
+    snap_to_pixels: bpy.props.BoolProperty(
+        name="Snap to Pixels",
+        description="Align UV coordinates to increments of pixels in texture per face",
+        default=False)
+
+    snap_step: bpy.props.IntVectorProperty(
+        name="Snap Step",
+        description="Pixel snap increment for Snap To Pixels",
+        default=[1,1],
+        subtype='XYZ',
+        size=2,
+        min=0,
+        soft_max=64)
+
     set_shift: bpy.props.BoolProperty(name="Set Shift")
 
     shift: bpy.props.FloatVectorProperty(
@@ -723,6 +743,13 @@ class AURYCAT_OT_nail_edit_texture_config(Operator):
         layout = self.layout
         layout.use_property_split = True
         layout.use_property_decorate = False
+        layout.prop(self, 'snap_to_pixels')
+
+        snap = layout.column()
+        snap.enabled = self.snap_to_pixels
+        snap.prop(self, 'snap_step')
+
+        layout.separator()
 
         if 'shift' in cls.differing_values:
             if not self.set_shift:
@@ -861,6 +888,11 @@ class AURYCAT_OT_nail_edit_texture_config(Operator):
                 tc.flags_set |= TCFLAG_ALIGN_LOCKED
                 if self.uv_align == 'face':
                     tc.flags |= TCFLAG_ALIGN_FACE
+
+            # Save snap settings to prefs, since they're global
+            prefs = bpy.context.preferences.addons[PACKAGE_NAME].preferences
+            prefs.snap_step = self.snap_step
+            prefs.snap_to_pixels = self.snap_to_pixels
 
             set_or_apply_selected_faces(tc, context, set=True, apply=True, only_nailmeshes=True)
 
@@ -1639,6 +1671,12 @@ class NailMesh:
         for attr_name, attr_info in ATTRS.items():
             layer = attr_info[2](self.bm)
             setattr(self, attr_info[3], layer[attr_name])
+        # Cache these for use in apply_texture_one_face which may be called
+        # many times while the NailMesh is in use.
+        self.snap_to_pixels = NailPreferences.get('snap_to_pixels')
+        if self.snap_to_pixels:
+            self.snap_step = Vector(NailPreferences.get('snap_step'))
+            self.snap_xy_per_material_cache = {}
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -1954,6 +1992,28 @@ class NailMesh:
         rotation_mat = Matrix.Rotation(f.rotation, 2)
         uv_layer = self.uv_layer
 
+        snap_x, snap_y = 0, 0
+        if self.snap_to_pixels:
+            if face.material_index in self.snap_xy_per_material_cache:
+                snap_x, snap_y = self.snap_xy_per_material_cache[face.material_index]
+            else:
+                # Lookup face's material and find the snap_x, snap_y values.
+                # Will be the same per material_index value, so cache it.
+                # Some quick profiling shows caching helps a little on large meshes.
+                try:
+                    slot = self.obj.material_slots[face.material_index]
+                    if slot.material and slot.material.use_nodes:
+                        tex_node = next((n for n in slot.material.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image), None)
+                        if tex_node:
+                            img_width, img_height = tex_node.image.size[0], tex_node.image.size[1]
+                            if self.snap_step.x >= 1:
+                                snap_x = img_width / self.snap_step.x
+                            if self.snap_step.y >= 1:
+                                snap_y = img_height / self.snap_step.y
+                            self.snap_xy_per_material_cache[face.material_index] = (snap_x, snap_y)
+                except Exception:
+                    pass
+
         for loop in face.loops:
             vert_coord = loop.vert.co
             if f.world_space:
@@ -1964,6 +2024,12 @@ class NailMesh:
             uv_coord.x /= f.scale.x
             uv_coord.y /= f.scale.y
             uv_coord += f.shift
+
+            if snap_x > 0:
+                uv_coord.x = round(uv_coord.x * snap_x) / snap_x
+            if snap_y > 0:
+                uv_coord.y = round(uv_coord.y * snap_y) / snap_y
+
             loop[uv_layer].uv = uv_coord
 
         if self.wrap_uvs:
