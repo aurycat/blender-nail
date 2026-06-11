@@ -1336,17 +1336,25 @@ class AURYCAT_OT_nail_internal_modal_locked_transform(Operator):
             # This is hacky so do some sanity checks. Hopefully catches issues in the
             # case of a Blender change breaking this code.
             if bpy.context.active_operator.bl_idname != this_class_name:
-                async_report_error(f"Something went wrong finalizing this texture-locked transform operation (unexpected active operator {bpy.context.active_operator.bl_idname})")
+                async_report_error(
+                    "Something went wrong finalizing this texture-locked transform operation.\n" + \
+                    f"(Unexpected active operator {bpy.context.active_operator.bl_idname}.)")
                 return
             elif len(bpy.context.window_manager.operators) < 2:
-                async_report_error(f"Something went wrong finalizing this texture-locked transform operation (expected at least two operators in the operator history)")
+                async_report_error(
+                    "Something went wrong finalizing this texture-locked transform operation.\n" + \
+                    "(Expected at least two operators in the operator history.)")
                 return
             elif bpy.context.window_manager.operators[-1].bl_idname != this_class_name:
                 # I think operators[-1] is always the same as the active_operator, but just being sure...
-                async_report_error(f"Something went wrong finalizing this texture-locked transform operation (unexpected [-1] operator {bpy.context.window_manager.operators[-1].bl_idname})")
+                async_report_error(
+                    "Something went wrong finalizing this texture-locked transform operation.\n" + \
+                    f"(Unexpected [-1] operator {bpy.context.window_manager.operators[-1].bl_idname}.)")
                 return
             elif bpy.context.window_manager.operators[-2].bl_idname != underlying_op:
-                async_report_error(f"Something went wrong finalizing this texture-locked transform operation (unexpected [-2] operator {bpy.context.window_manager.operators[-2].bl_idname} - expected {underlying_op})")
+                async_report_error(
+                    "Something went wrong finalizing this texture-locked transform operation.\n" + \
+                    f"(Unexpected [-2] operator {bpy.context.window_manager.operators[-2].bl_idname} - expected {underlying_op}.)")
                 return
             with bpy.context.temp_override(**saved_context):
                 # Undo this operator
@@ -2061,8 +2069,52 @@ class NailMesh:
     # do "what the user expects"(TM).
     def set_face_uv_axes(self, f, uaxis, vaxis):
         flags = f.flags
+
+        # Validate axes
+        valid = True
+        u_len = uaxis.length_squared
+        v_len = vaxis.length_squared
+        if not isclose(u_len, 1):
+            if valid := not isclose(u_len, 0):
+                uaxis.normalize()
+        if valid and not isclose(v_len, 1):
+            if valid := not isclose(v_len, 0):
+                vaxis.normalize()
+
+        if valid:
+            # Check that the axes are orthogonal. Axes can become non-orthogonal
+            # if computed in object space on an object with non-uniform scale.
+            dot = uaxis.dot(vaxis)
+            if not isclose(dot, 0):
+                # Not orthogonal. Try to nudge the axes into being orthogonal.
+                bad = abs(dot) > 0.01
+                u = uaxis - dot * vaxis # u is orthogonal to vaxis
+                v = vaxis - dot * uaxis # v is orthogonal to uaxis
+                u.normalize()
+                v.normalize()
+                u = u.lerp(uaxis, 0.5)
+                v = v.lerp(vaxis, 0.5)
+                u.normalize()
+                v.normalize()
+                uaxis = u
+                vaxis = v
+                # I think the above should always compute orthogonal axes,
+                # but write an extra message in case it doesn't...
+                if not isclose(uaxis.dot(vaxis), 0):
+                    async_report_error( \
+                        "Nail computed invalid (non-orthogonal) UV axes, and failed to automatically correct it.\n" + \
+                        "Reverting to 'Axis' UV alignment. This can happen when using 'Object' Space Alignment on\n" + \
+                        "objects with non-uniform scale (scale is not the same on all X, Y, and Z). Avoid using\n" + \
+                        "non-uniform scale on NailMeshes, or use 'World' SpaceAlignment.", plsreport=False)
+                    valid = False
+                else:
+                    async_report_error(
+                        "Nail computed invalid (non-orthogonal) UV axes. This can happen when using 'Object' Space\n" + \
+                        "Alignment on objects with non-uniform scale (scale is not the same on all X, Y, and Z).\n" + \
+                        "Avoid using non-uniform scale on NailMeshes, or use 'World' Space Alignment.", plsreport=False)
+
         aa_uaxis, aa_vaxis = self.get_axis_aligned_uv_axes(f)
-        if vec3_isclose(uaxis, aa_uaxis) and vec3_isclose(vaxis, aa_vaxis):
+        if not valid or (vec3_isclose(uaxis, aa_uaxis) and vec3_isclose(vaxis, aa_vaxis)):
             # Great news, the new axes are the same as axis-aligned mode! Switch to that
             flags = clear_flag(flags, TCFLAG_ALIGN_LOCKED)
             flags = clear_flag(flags, TCFLAG_ALIGN_FACE)
@@ -2354,10 +2406,14 @@ def copy_flag(a, b, c):
     return int(a) ^ ((int(a) ^ int(b)) & int(c))
 
 # Report error when not in an operator
-def async_report_error(msg):
+def async_report_error(msg, plsreport=True):
+    if plsreport:
+        msg = msg + "\nThis is probably a bug in Nail. Please report the issue on Nail's GitHub page."
+    msglines = msg.splitlines()
     def draw(self, _):
-        self.layout.label(text=msg)
-    bpy.context.window_manager.popup_menu(draw, title="Report: Error", icon='ERROR')
+        for line in msglines:
+            self.layout.label(text=line)
+    bpy.context.window_manager.popup_menu(draw, title="Nail Error", icon='ERROR')
 
 def set_handler_enabled(handler_list, func, enable):
     if enable:
