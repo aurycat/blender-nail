@@ -17,7 +17,7 @@ https://github.com/user-attachments/assets/54254035-c485-4890-a758-f37736af725d
 
 [This article ](https://developer.valvesoftware.com/wiki/Texture_alignment) explains texture alignment in Hammer. The same information is true of Nail, although "World Alignment" is called "Axis Alignment" in Nail. Nail uses the term "World Alignment" and "Object Alignment" to refer to whether alignment is performed relative to the entire scene, or relative to the current Mesh object.
 
-Hammer's Alt+RightClick feature can be done in Nail by using `Nail > Copy Active to Selected`.
+Hammer's Alt+RightClick feature can be done in Nail by using `Nail > Align Selected with Active`.
 
 Texture-locked movement is the same as enabling "Texture Lock" in Hammer (which is enabled by default).
 

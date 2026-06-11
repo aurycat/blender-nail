@@ -22,6 +22,13 @@
 
 # History:
 #   0.3 - Public release
+#   0.4 - New 'Align Selected With Active' operator to replicate the
+#         Alt+RightClick functionality of Hammer. New 'Convert Space Alignment'
+#         operator to convert between object and world space while keeping the
+#         texture unchanged. Improvements to 'Copy Active to Selected' operator.
+#         Basic pixel-snapping functionality (does not save settings per-face
+#         or per material yet). Fixed issues with Blender 5.x, should work on
+#         Blender 4.x and 5.x now.
 
 # Development:
 #   You can load the script file into the blender text editor and click the
