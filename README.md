@@ -4,7 +4,7 @@ Blender addon to do live UV mapping like Valve's Hammer editor. If you've ever b
 
 ## Installation
 
-1. [Download the latest release zip file](https://github.com/aurycat/blender-nail/releases/latest/download/blender-nail.zip), but don't unzip.
+1. [Download the latest release zip file](https://github.com/aurycat/blender-nail/releases/download/0.4/blender-nail-0.4.zip), but don't unzip.
 2. In Blender, go to `Edit > Preferences > Add-ons > Dropdown in the top right > Install from Disk` and select the zip file.
 
 ## Usage
