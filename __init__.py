@@ -1,6 +1,6 @@
 # MIT License
 #
-# Copyright (c) 2024 aurycat
+# Copyright (c) 2026 aurycat
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -29,6 +29,8 @@
 #         Basic pixel-snapping functionality (does not save settings per-face
 #         or per material yet). Fixed issues with Blender 5.x, should work on
 #         Blender 4.x and 5.x now.
+#   0.5 - Instead of active UV map, use map named "NailUV", or UV0 if that
+#         doesn't exist.
 
 # Development:
 #   You can load the script file into the blender text editor and click the
@@ -39,7 +41,7 @@ bl_info = {
     "name": "Nail UVs",
     "description": "Implements world-space automatic UV unwrapping similar to Valve's Hammer level editor",
     "author": "aurycat",
-    "version": (0, 4),
+    "version": (0, 5),
     "blender": (4, 1, 1), # Minimum tested version. Might work with older.
     "location": "View3D > Nail (Edit mode)",
     "warning": "",
@@ -98,6 +100,8 @@ TCFLAG_ALIGN_LOCKED = 8   # True for manual alignment of UX axes. Cannot be comb
                           # ALIGN_FACE.
 
 TCFLAG_ALL = TCFLAG_ENABLED | TCFLAG_OBJECT_SPACE | TCFLAG_ALIGN_FACE | TCFLAG_ALIGN_LOCKED
+
+NAIL_UV_MAP_NAME = "NailUV"
 
 def nail_classes():
     return [
@@ -1653,6 +1657,9 @@ class TextureConfig:
 #     with NailMesh(...) as nm:
 # On entry to the 'with', a BMesh is created, and on exit from the 'with',
 # the BMesh is saved and freed.
+# Set readonly=True to not do any "setup" when creating the NailMesh
+# object. You should not call any mutable methods, like apply_texture,
+# with a readonly NailMesh, although it won't stop you.
 class NailMesh:
     def __init__(self, obj, readonly=False):
         if obj.type != 'MESH':
@@ -1667,6 +1674,8 @@ class NailMesh:
         self.rot_world = self.matrix_world.to_quaternion()
         self.wrap_uvs = NailPreferences.get('wrap_uvs')
         self.me = self.obj.data
+        if not self.readonly:
+            self.init_uv_layer()
         if self.me.is_editmode:
             self.bm = bmesh.from_edit_mesh(self.me)
         else:
@@ -1674,7 +1683,7 @@ class NailMesh:
             self.bm.from_mesh(self.me)
         if not self.readonly:
             self.init_attrs()
-        self.uv_layer = self.bm.loops.layers.uv.active
+        self.get_uv_layer()
         for attr_name, attr_info in ATTRS.items():
             layer = attr_info[2](self.bm)
             setattr(self, attr_info[3], layer[attr_name])
@@ -1697,13 +1706,30 @@ class NailMesh:
         self.bm = None
         self.me = None
 
-    def init_attrs(self):
-        if len(self.bm.loops.layers.uv) == 0:
-            self.bm.loops.layers.uv.new("UVMap")
-        elif self.bm.loops.layers.uv.active is None:
-            # Not sure if this is possible, but just to be safe
-            raise RuntimeError(f"Mesh '{self.me.name}' has at least one UV Map, but none are marked 'active'. Please make sure a UVMap is selected on this mesh.")
+    # Call before BMesh is created, since BMesh can't rename
+    # UV layers for some reason even though it can create them!
+    def init_uv_layer(self):
+        layers = self.me.uv_layers
+        if len(layers) == 0:
+            layers.new(NAIL_UV_MAP_NAME)
+        # Rename UV0 if it has the default name
+        elif layers[0].name == "UVMap" and NAIL_UV_MAP_NAME not in layers:
+            layers[0].name = NAIL_UV_MAP_NAME
 
+    # Call after BMesh is created
+    def get_uv_layer(self):
+        uv = self.bm.loops.layers.uv
+        if len(uv) == 0:
+            # Should only be possible in readonly mode, since init_uv_layer()
+            # should have created a new uv map already.
+            self.uv_layer = None
+        else:
+            # Prefer a layer named NAIL_UV_MAP_NAME if it exists, otherwise pick layer 0
+            self.uv_layer = uv.get(NAIL_UV_MAP_NAME)
+            if self.uv_layer is None:
+                self.uv_layer = uv[0]
+
+    def init_attrs(self):
         for attr_name, attr_info in ATTRS.items():
             layer = attr_info[2](self.bm)
             if attr_name not in layer:
